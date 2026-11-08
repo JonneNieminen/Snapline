@@ -3,6 +3,12 @@
 
 namespace snapline
 {
+namespace
+{
+constexpr float subMultipleMargin = 0.10f;  // a shorter lag may be this much less periodic and still win
+constexpr float subMultipleCeiling = 0.35f; // ... but never if it is not clearly periodic itself
+}
+
 void PitchDetector::prepare (double sampleRate, int maxWindow)
 {
     fs = sampleRate;
@@ -92,6 +98,25 @@ PitchDetector::Result PitchDetector::detect (const float* frame, int window, int
         for (int tau = minLag + 1; tau < W; ++tau)
             if (diff[(size_t) tau] < diff[(size_t) best])
                 best = tau;
+    }
+
+    // Multiple-of-the-period guard. The first dip below the threshold can sit at two, three or more
+    // periods when the real period is just above it (breathy or fading notes). If a shorter lag
+    // k times smaller is nearly as periodic, that is the real period.
+    for (int k = 2; k <= 6; ++k)
+    {
+        const int centre = (int) std::lround ((double) best / k);
+        if (centre < minLag)
+            break;
+        int local = centre;
+        for (int tau = juce::jmax (minLag, centre - 2); tau <= juce::jmin (W - 1, centre + 2); ++tau)
+            if (diff[(size_t) tau] < diff[(size_t) local])
+                local = tau;
+        if (diff[(size_t) local] < diff[(size_t) best] + subMultipleMargin && diff[(size_t) local] < subMultipleCeiling)
+        {
+            best = local;
+            break;
+        }
     }
 
     float refined = (float) best;

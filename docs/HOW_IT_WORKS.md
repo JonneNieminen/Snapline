@@ -7,7 +7,7 @@ Snapline corrects a monophonic vocal in three stages: it **tracks** the pitch, *
 - The input is summed to mono and analysed 375 times a second (a hop of about 2.7 ms).
 - Each frame runs [YIN](https://audition.ens.fr/adc/pdf/2002_JASA_YIN.pdf): the difference function is computed with an FFT cross-correlation, normalised, and the first dip under 0.15 is refined with parabolic interpolation.
 - **Input type** sets the search range (Soprano 130–1100 Hz, Alto/Tenor 80–800 Hz, Low Male 55–420 Hz, Instrument 45–1300 Hz) and the window length.
-- A frame counts as voiced when it is periodic enough, above −60 dBFS and within 22 dB of the recent vocal level. Short dropouts of up to 30 ms inside a note are bridged, and sudden factor-of-two jumps are treated as octave errors.
+- A frame counts as voiced when it is periodic enough, above −60 dBFS and within 22 dB of the recent vocal level. Short dropouts of up to 30 ms inside a note are bridged, and sudden jumps to two to six times the previous pitch are treated as octave errors and folded back. The detector also prefers a shorter period when it is almost as periodic, so breathy or fading notes are not read an octave or a twelfth too low. A big leap has to appear twice in a row before it is believed.
 
 ## 2. Correction
 
@@ -29,7 +29,7 @@ For every voiced frame:
 
 ### Delay
 
-A grain can only be built once a full period after its centre has arrived. **Studio** delays the output by a fixed 100 ms, which always leaves enough input for every grain and the 21 ms look-ahead. That delay is reported to the host, so playback stays in time. **Live** starts at 8 ms and adds delay only when a grain's source isn't available yet, then slowly gives it back. In practice it settles at 8–20 ms (about two to three periods of the voice), and the header shows the current figure. The host can't compensate for this varying delay, so use Studio for the final pass.
+A grain can only be built once a full period after its centre has arrived. **Studio** delays the output by a fixed 100 ms, which always leaves enough input for every grain and the 21 ms look-ahead. That delay is reported to the host, so playback stays in time. **Live** starts at 8 ms and adds delay only when a grain's source isn't available yet. It gives delay back only in pauses and unvoiced sound, never during a note, because moving the delay while a note sounds detunes it. In practice it settles at 8–20 ms (about two to three periods of the voice), and the header shows the current figure. The host can't compensate for this varying delay, so use Studio for the final pass.
 
 ## Bypass and presets
 
@@ -52,6 +52,6 @@ A grain can only be built once a full period after its centre has arrived. **Stu
 ## Limits
 
 - Monophonic sources only. Chords, doubles and heavy reverb confuse the tracker.
-- Stereo inputs are tuned as a mono sum.
+- Pitch is tracked on the sum of the channels, but each channel is resynthesised from the same pitch marks, so the stereo image survives.
 - Very breathy or growled notes may be treated as unvoiced and passed through unchanged.
 - There is no graphical note editing; Snapline works in real time.

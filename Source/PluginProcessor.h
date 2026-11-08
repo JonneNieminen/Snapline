@@ -75,7 +75,7 @@ public:
 
 private:
     snapline::SnaplineDsp dsp;
-    std::atomic<int> currentPreset { 2 };
+    std::atomic<int> currentPreset { 0 }; // Natural: a new instance starts organic, not tight
     std::atomic<double> preparedRate { 0.0 };
     std::atomic<snapline::NoteMask> activeNotes { snapline::allNotes };
     std::atomic<snapline::NoteMask> heldMask { 0 };

@@ -134,9 +134,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout SnaplineAudioProcessor::crea
     p.add (std::make_unique<Choice> (juce::ParameterID { midiModeId, 1 }, "MIDI Notes",
                                      juce::StringArray { "Off", "Snap to Held Notes", "Force to Held Note" }, 0));
 
-    p.add (std::make_unique<Float> (juce::ParameterID { retuneId, 1 }, "Retune Speed", Range (0.0f, 400.0f, 0.1f, 0.4f), 18.0f, withUnit (" ms", 0)));
-    p.add (std::make_unique<Float> (juce::ParameterID { humanizeId, 1 }, "Humanize", Range (0.0f, 100.0f, 0.1f), 20.0f, withUnit ("%", 0)));
-    p.add (std::make_unique<Float> (juce::ParameterID { toleranceId, 1 }, "Tolerance", Range (0.0f, 100.0f, 0.1f), 0.0f, withUnit ("%", 0)));
+    p.add (std::make_unique<Float> (juce::ParameterID { retuneId, 1 }, "Retune Speed", Range (0.0f, 400.0f, 0.1f, 0.4f), 85.0f, withUnit (" ms", 0)));
+    p.add (std::make_unique<Float> (juce::ParameterID { humanizeId, 1 }, "Humanize", Range (0.0f, 100.0f, 0.1f), 45.0f, withUnit ("%", 0)));
+    p.add (std::make_unique<Float> (juce::ParameterID { toleranceId, 1 }, "Tolerance", Range (0.0f, 100.0f, 0.1f), 35.0f, withUnit ("%", 0)));
     p.add (std::make_unique<Float> (juce::ParameterID { amountId, 1 }, "Amount", Range (0.0f, 100.0f, 0.1f), 100.0f, withUnit ("%", 0)));
     p.add (std::make_unique<Float> (juce::ParameterID { transposeId, 1 }, "Transpose", Range (-12.0f, 12.0f, 1.0f), 0.0f, withUnit (" st", 0)));
     p.add (std::make_unique<Float> (juce::ParameterID { referenceId, 1 }, "A4 Reference", Range (415.0f, 466.0f, 0.1f), 440.0f, withUnit (" Hz", 1)));

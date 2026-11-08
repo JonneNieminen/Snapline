@@ -98,7 +98,8 @@ struct SnaplineDsp::Impl
     int unvoicedPeriod = 256;
     int ringSize = 0, ringMask = 0;
 
-    std::vector<float> input, lowpassed, dryL, dryR, acc, win, scratch;
+    std::vector<float> input, lowpassed, dryL, dryR, accL, accR, win, scratch;
+    bool stereo = false;                  // two channels in: both are resynthesised from the shared pitch marks
     std::vector<std::uint8_t> blockLoud;   // per 32-sample block of `input`: any sample above -140 dB
     float blockPeak = 0.0f;
     int hopCounter = 0;
@@ -116,11 +117,13 @@ struct SnaplineDsp::Impl
     int lookahead = 0;
     double synthPos = 0.0;                // next grain centre (output timeline)
     double extraDelay = 0.0;              // live-mode adaptive delay on top of `latency`
+    double delayFloor = 0.0;              // what this voice has needed lately; pauses never relax below it (decays over ~4 s)
     float lp1 = 0.0f, lp2 = 0.0f, lpCoeff = 0.0f;
 
     // Tracker state
     bool trackerVoiced = false;
     float lastVoicedHz = 0.0f;
+    float suspectHz = 0.0f;               // a large jump seen once, waiting for confirmation
     float lastShift = 0.0f;
     int holdFramesLeft = 0;
     float recentHz[3] {};
@@ -152,7 +155,7 @@ struct SnaplineDsp::Impl
         unvoicedPeriod = juce::jmax (16, (int) std::lround (fs / 180.0));
         ringSize = nextPow2 ((int) (fs * (studioLatencySeconds + 0.3)) + 8 * maxWindow);
         ringMask = ringSize - 1;
-        for (auto* v : { &input, &lowpassed, &dryL, &dryR, &acc, &win })
+        for (auto* v : { &input, &lowpassed, &dryL, &dryR, &accL, &accR, &win })
             v->assign ((size_t) ringSize, 0.0f);
         scratch.assign ((size_t) (2 * maxWindow + 4), 0.0f);
         blockLoud.assign ((size_t) (ringSize >> silenceBlockShift), (std::uint8_t) 0);
@@ -166,7 +169,7 @@ struct SnaplineDsp::Impl
 
     void reset()
     {
-        for (auto* v : { &input, &lowpassed, &dryL, &dryR, &acc, &win })
+        for (auto* v : { &input, &lowpassed, &dryL, &dryR, &accL, &accR, &win })
             std::fill (v->begin(), v->end(), 0.0f);
         now = 0;
         hopCounter = 0;
@@ -179,6 +182,7 @@ struct SnaplineDsp::Impl
         lp1 = lp2 = 0.0f;
         trackerVoiced = false;
         lastVoicedHz = 0.0f;
+        suspectHz = 0.0f;
         lastShift = 0.0f;
         holdFramesLeft = 0;
         levelEnvelope = 0.0f;
@@ -193,6 +197,7 @@ struct SnaplineDsp::Impl
         applyMode (mode);
         synthPos = (double) latency;
         extraDelay = 0.0;
+        delayFloor = 0.0;
         displayFifo.reset();
     }
 
@@ -220,16 +225,16 @@ struct SnaplineDsp::Impl
         ++markCount;
     }
 
-    float sampleAt (std::int64_t t) const
+    float sampleAt (const std::vector<float>& ring, std::int64_t t) const
     {
-        return t < 0 ? 0.0f : input[(size_t) (t & ringMask)];
+        return t < 0 ? 0.0f : ring[(size_t) (t & ringMask)];
     }
 
-    float interpolatedAt (double position) const
+    float interpolatedAt (const std::vector<float>& ring, double position) const
     {
         const auto base = (std::int64_t) std::floor (position);
         const float frac = (float) (position - (double) base);
-        return hermite (sampleAt (base - 1), sampleAt (base), sampleAt (base + 1), sampleAt (base + 2), frac);
+        return hermite (sampleAt (ring, base - 1), sampleAt (ring, base), sampleAt (ring, base + 1), sampleAt (ring, base + 2), frac);
     }
 
     // ------------------------------------------------------------------ analysis
@@ -263,14 +268,33 @@ struct SnaplineDsp::Impl
         const bool loudEnough = res.rms > gateRms && res.rms > levelEnvelope * relativeGate;
         bool voiced = inRange && loudEnough && res.aperiodicity < limit;
 
-        // Octave-jump guard: a sudden factor-of-two jump inside a voiced run is
-        // almost always a detection error; keep the previous estimate's octave.
+        // Jump guard for a voiced run. A detection that is two to six times off the previous
+        // pitch is almost always the detector landing on a multiple (or a harmonic) of the real
+        // period; fold it back. Any other jump of more than three semitones must show up in two
+        // frames in a row before it is believed (a legato leap does; a one-frame glitch does not).
         if (voiced && trackerVoiced && lastVoicedHz > 0.0f)
         {
             const float ratio = res.hz / lastVoicedHz;
-            if (ratio > 1.85f && ratio < 2.15f) res.hz *= 0.5f;
-            else if (ratio > 0.465f && ratio < 0.54f) res.hz *= 2.0f;
+            for (int n = 2; n <= 6; ++n)
+            {
+                if (std::abs (1200.0f * std::log2 (ratio * (float) n)) < 140.0f) { res.hz *= (float) n; break; }
+                if (std::abs (1200.0f * std::log2 (ratio / (float) n)) < 140.0f) { res.hz /= (float) n; break; }
+            }
+            if (std::abs (1200.0f * std::log2 (res.hz / lastVoicedHz)) > 300.0f)
+            {
+                if (suspectHz > 0.0f && std::abs (1200.0f * std::log2 (res.hz / suspectHz)) < 60.0f)
+                    suspectHz = 0.0f;          // confirmed: a real leap
+                else
+                {
+                    suspectHz = res.hz;
+                    voiced = false;            // ignore this frame; the hold below keeps the note going
+                }
+            }
+            else
+                suspectHz = 0.0f;
         }
+        else
+            suspectHz = 0.0f;
 
         if (voiced)
         {
@@ -715,6 +739,7 @@ struct SnaplineDsp::Impl
             return;
 
         const auto& table = hannTable();
+        const int channels = stereo ? 2 : 1;
         const bool fixedPhase = g.formant == 1.0; // the read offset is the same for every sample
         float h0 = 0, h1 = 0, h2 = 0, h3 = 0;
         std::int64_t base0 = 0;
@@ -740,16 +765,22 @@ struct SnaplineDsp::Impl
             const float w = table[(size_t) k] + (table[(size_t) k + 1] - table[(size_t) k]) * (x - (float) k);
             if (w <= 0.0f)
                 continue;
-            float sample;
-            if (fixedPhase)
+            // Every channel is cut at the same marks with the same window, so the stereo image
+            // (level, phase and timing differences between the channels) is kept.
+            for (int ch = 0; ch < channels; ++ch)
             {
-                const auto p = base0 + (i - first);
-                sample = direct ? sampleAt (p)
-                                : h0 * sampleAt (p - 1) + h1 * sampleAt (p) + h2 * sampleAt (p + 1) + h3 * sampleAt (p + 2);
+                const auto& ring = ch == 0 ? dryL : dryR;
+                float sample;
+                if (fixedPhase)
+                {
+                    const auto p = base0 + (i - first);
+                    sample = direct ? sampleAt (ring, p)
+                                    : h0 * sampleAt (ring, p - 1) + h1 * sampleAt (ring, p) + h2 * sampleAt (ring, p + 1) + h3 * sampleAt (ring, p + 2);
+                }
+                else
+                    sample = interpolatedAt (ring, (double) g.centre + d * g.formant);
+                (ch == 0 ? accL : accR)[(size_t) (i & ringMask)] += w * sample;
             }
-            else
-                sample = interpolatedAt ((double) g.centre + d * g.formant);
-            acc[(size_t) (i & ringMask)] += w * sample;
             win[(size_t) (i & ringMask)] += w;
         }
     }
@@ -783,14 +814,19 @@ struct SnaplineDsp::Impl
                 if (! sourceAvailable (j, g))
                     return;
                 extraDelay = juce::jmax (0.0, synthPos - (double) latency - (double) g.centre);
+                delayFloor = juce::jmax (delayFloor, extraDelay);
             }
-            else if (extraDelay > 0.0)
+            else if (extraDelay > 0.0 && ! mark (j).voiced)
             {
-                // Give delay back slowly once there is plenty of input in hand.
+                // Give delay back only in unvoiced sound and pauses, where moving the read
+                // position is inaudible, and never below what this voice has needed lately.
+                // Doing it during a note stretches the audio (a steady detune of several cents)
+                // and was the main source of Live-mode damage.
                 const double headroom = (double) now - ((double) g.centre + g.sourceReach);
                 if (headroom > 2.5 * g.right)
-                    extraDelay = juce::jmax (0.0, extraDelay - 0.005 * g.right);
+                    extraDelay = juce::jmax (delayFloor, extraDelay - 0.25 * g.right);
             }
+            delayFloor *= std::exp (-g.right / (4.0 * fs));
 
             addGrain (synthPos, g, blockStart);
             synthPos += juce::jmax (2.0, g.right / juce::jlimit (0.25, 4.0, g.ratio));
@@ -801,10 +837,12 @@ struct SnaplineDsp::Impl
     void process (const float* inL, const float* inR, float* outL, float* outR, int numSamples, const SnaplineParams& p)
     {
         params = &p;
+        stereo = inR != nullptr;
         if (p.mode != mode)
         {
             applyMode (p.mode);
             extraDelay = 0.0;
+            delayFloor = 0.0;
         }
 
         const std::int64_t blockStart = now;
@@ -820,7 +858,7 @@ struct SnaplineDsp::Impl
             lowpassed[idx] = lp2;
             dryL[idx] = l;
             dryR[idx] = r;
-            blockPeak = std::max (blockPeak, std::abs (mono));
+            blockPeak = std::max ({ blockPeak, std::abs (l), std::abs (r) });
             if ((now & ((1 << silenceBlockShift) - 1)) == (1 << silenceBlockShift) - 1)
             {
                 blockLoud[(size_t) ((now >> silenceBlockShift) & (std::int64_t) (blockLoud.size() - 1))] = blockPeak > silenceLevel ? 1 : 0;
@@ -851,8 +889,11 @@ struct SnaplineDsp::Impl
             const std::int64_t o = blockStart + i;
             const auto idx = (size_t) (o & ringMask);
             const float wsum = win[idx];
-            const float wet = wsum > 0.0f ? acc[idx] / juce::jmax (wsum, 0.5f) : 0.0f;
-            acc[idx] = 0.0f;
+            const float norm = wsum > 0.0f ? 1.0f / juce::jmax (wsum, 0.5f) : 0.0f;
+            const float wetL = accL[idx] * norm;
+            const float wetR = stereo ? accR[idx] * norm : wetL;
+            accL[idx] = 0.0f;
+            accR[idx] = 0.0f;
             win[idx] = 0.0f;
             const std::int64_t dryPos = o - latency;
             const float dl = dryPos >= 0 ? dryL[(size_t) (dryPos & ringMask)] : 0.0f;
@@ -861,11 +902,11 @@ struct SnaplineDsp::Impl
             gainSmoothed += smooth * (gainTarget - gainSmoothed);
             bypassSmoothed += bypassSmooth * (bypassTarget - bypassSmoothed);
             // The dry path is delayed by the reported latency, so bypassing never shifts timing.
-            const float processedL = (wet * mixSmoothed + dl * (1.0f - mixSmoothed)) * gainSmoothed;
+            const float processedL = (wetL * mixSmoothed + dl * (1.0f - mixSmoothed)) * gainSmoothed;
             outL[i] = processedL + bypassSmoothed * (dl - processedL);
             if (outR != nullptr)
             {
-                const float processedR = (wet * mixSmoothed + dr * (1.0f - mixSmoothed)) * gainSmoothed;
+                const float processedR = (wetR * mixSmoothed + dr * (1.0f - mixSmoothed)) * gainSmoothed;
                 outR[i] = processedR + bypassSmoothed * (dr - processedR);
             }
         }

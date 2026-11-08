@@ -73,9 +73,9 @@ Rules: single-producer/single-consumer FIFO (capacity 4096 frames), atomics with
 All sample positions are absolute `int64` counters into power-of-two rings sized in `prepare()` (≥ 0.4 s + 8 analysis windows).
 
 ### 5.1 Input and analysis
-- Mono sum (`(L+R)/2`) into the input ring, plus a 2-pole 900 Hz low-pass copy for pitch-mark picking, plus per-channel dry rings for the latency-aligned dry mix.
+- Mono sum (`(L+R)/2`) into the input ring for analysis, plus a 2-pole 900 Hz low-pass copy for pitch-mark picking, plus per-channel rings (the latency-aligned dry mix, and the sources the grains are cut from). Pitch is tracked on the sum; **each channel is resynthesised** from the shared marks, so the stereo image survives (before, the wet signal was the mono sum on both outputs, which collapsed stereo even at Amount 0).
 - Every `hop = fs/375` samples (2.7 ms): YIN on the last `2W` samples, `W = fs/minHz` for the selected **Input type** (Soprano 130–1100 Hz, Alto/Tenor 80–800, Low Male 55–420, Instrument 45–1300).
-- Voicing: aperiodicity < 0.25 to start and < 0.35 to continue; RMS > −60 dBFS and within 22 dB of a 0.6 s peak envelope; 30 ms hold bridges dropouts; ×2 / ×½ jumps inside a voiced run are folded back (octave guard).
+- Voicing: aperiodicity < 0.25 to start and < 0.35 to continue; RMS > −60 dBFS and within 22 dB of a 0.6 s peak envelope; 30 ms hold bridges dropouts. **Multiple-of-period guard** in the YIN detector: if a lag 2–6 times shorter is nearly as periodic (within 0.10, and below 0.35) it wins, because the first dip under the threshold can sit at several periods on breathy or fading notes. **Jump guard** in the engine: inside a voiced run a detection 2–6 times off the previous pitch is folded back (octave and sub-harmonic errors); any other jump of more than 3 semitones is ignored for a frame and believed only if it repeats in the next one (a legato leap does, a glitch does not).
 
 ### 5.2 Correction (per frame)
 1. **Note decision**: median of neighbouring frames (Live: last 3; Studio: ±3 with 8-frame look-ahead) → nearest allowed note; 25-cent hysteresis; MIDI *force* overrides.
@@ -101,7 +101,7 @@ One mark per period at the peak of the low-passed signal within ±P/4 of `last +
 
 ### 5.5 Latency model
 - **Studio**: fixed `latency = 0.1·fs`, reported exactly; grain sources are always available.
-- **Live**: base 8 ms reported; when a grain's source isn't available yet, step back to the newest usable mark minus one period (`extraDelay`), then give delay back at 0.5 % of a period per grain once there are > 2.5 periods of headroom. Typical 8–20 ms.
+- **Live**: base 8 ms reported; when a grain's source isn't available yet, step back to the newest usable mark minus one period (`extraDelay`), then give delay back only in unvoiced sound and pauses (25 % of a grain per grain, once there are > 2.5 periods of headroom) and never below `delayFloor`, the largest delay the voice needed lately, which decays over about 4 s. Giving delay back during a note stretches the audio (the old 0.5 %/grain was a steady 8 ct detune) and was the main source of Live-mode damage. Typical 8–22 ms, mean about 13 ms on a real vocal.
 - Mode changes are applied inside `process` and reported via `AsyncUpdater`; `mode` is not automatable.
 
 ### 5.6 Output
@@ -117,9 +117,9 @@ Dry (delayed by `latency`, per channel) / wet (mono) mix and output gain, both s
 | `scale` | Scale | Chromatic, Major, Minor, Harmonic Minor, Melodic Minor, Major/Minor Pentatonic, Blues, Dorian, Phrygian, Lydian, Mixolydian, Custom | Chromatic |
 | `note0`…`note11` | Note C…B | bool (Custom scale) | on |
 | `midiMode` | MIDI Notes | Off, Snap to Held Notes, Force to Held Note | Off |
-| `retune` | Retune Speed | 0–400 ms (skewed) | 18 |
-| `humanize` | Humanize | 0–100 % | 20 |
-| `tolerance` | Tolerance | 0–100 % | 0 |
+| `retune` | Retune Speed | 0–400 ms (skewed) | 85 |
+| `humanize` | Humanize | 0–100 % | 45 |
+| `tolerance` | Tolerance | 0–100 % | 35 |
 | `amount` | Amount | 0–100 % | 100 |
 | `transpose` | Transpose | −12…12 st | 0 |
 | `reference` | A4 Reference | 415–466 Hz | 440 |
@@ -177,6 +177,10 @@ CPU, measured by `SnaplineRender` (wall time of the engine alone, Release, one A
 | 44.1 kHz / 96 kHz (melody) | 0.6 % / 2.4 % | 0.6 % / 1.2 % |
 
 Where it went: YIN used one 4096-point FFT size for every input type (now the smallest power of two that fits 2·W: 2048 for Alto/Tenor, 1024 for Soprano); quiet frames skip the FFT; grain windows come from a 1024-entry table (symmetric, so overlapping grains still sum to one) instead of a `cos` per sample; grains at an unchanged formant factor use constant 4-tap Hermite weights (or plain copies when the read position is integral); grains cut from digitally silent input are skipped; with Mix at 0 the resynthesis is skipped (tracking continues for the display). Accuracy, null and latency numbers did not change.
+
+**Real-recording analysis** (`SnaplineRender --file <wav> [out-dir] [soprano|alto|low|instrument]`, offline, also writes the processed WAVs into `out-dir`, which must not be inside the repository): spectral distance, 1/3-octave envelope distance (does the tone survive), short-time level flutter, YIN roughness, pitch micro-movement, tracker glitch count and Live delay statistics for Amount 0, Pop, Natural and a chromatic Pop, in Studio and Live. Live is aligned block by block at the delay the engine reports. Use the song's own key: tuning to the wrong key makes Pop look much worse than it is. Results from private recordings are kept out of the repository.
+
+Synthetic regression checks added with it (`SnaplineRender`): stereo with differing channels (R = −0.6 × L delayed 2 ms): before, Amount 0 nulled at 7 / 2 dB and the side signal was gone (−234 dB side/mid); after, 148 dB per channel and the width is unchanged. Detector on noisy harmonic frames: before, 13–19 % of accepted frames were off by more than 120 ct (multiples of the period); after, about 2 % (the check allows 4 %).
 
 Also run: `auval -strict -v aumf SNL1 SNPL`, `SnaplineSnapshot docs/screenshots` after UI changes, and a listen to the WAVs `SnaplineRender renders` writes.
 

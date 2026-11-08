@@ -53,7 +53,7 @@ in real time, with formants that stay human. Tune by key and scale, your own not
 - **Studio and Live modes**: *Studio* looks ahead for the cleanest result and reports a fixed 100 ms delay that your DAW compensates for. *Live* keeps the delay low (typically 8–20 ms) for monitoring while you record.
 - **Vibrato**: add vibrato with depth, rate and onset delay.
 - **Live pitch display**: see the sung pitch, the corrected pitch, the current note and how much correction is applied.
-- **Presets**: Natural, Gentle Polish, Pop, Hard Tune, Robot, Ballad and Deep Voice. Presets change only the correction style, never your key or scale.
+- **Presets**: Natural, Gentle Polish, Pop, Hard Tune, Robot, Ballad and Deep Voice. Presets change only the correction style, never your key or scale. A new instance starts on Natural, the organic setting; Pop is the tighter one.
 - **Dark and light themes**, saved with the session.
 
 ## Install
@@ -109,7 +109,7 @@ Send MIDI to Snapline from a MIDI track. In Logic Pro, create an **External MIDI
 
 ### What to expect
 
-Snapline corrects **monophonic** sources: one voice or a solo instrument. Harmonies, doubled vocals or bleed confuse the pitch tracker. Stereo inputs are tuned as a mono sum and sent to both outputs. With *Mix* below 100 %, the original stereo signal is blended back in.
+Snapline corrects **monophonic** sources: one voice or a solo instrument. Harmonies, doubled vocals or bleed confuse the pitch tracker. Stereo inputs keep their image: the pitch is tracked on the sum of the channels and each channel is retuned from the same pitch marks.
 
 Live mode's delay adapts to the voice. It needs about two to three pitch periods, so low voices get a little more delay, and the DAW can't compensate for it. Use Studio for the final pass on recorded vocals. See [`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md) for the details.
 
