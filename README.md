@@ -131,7 +131,7 @@ Developer tools build with `-DSNAPLINE_BUILD_TOOLS=ON`:
 
 On Windows (Visual Studio 2022 or newer and CMake), configure with `cmake -S . -B build -A x64` and build `Snapline_VST3` in `Release`; `build/windows/snapline.iss` packages it with [Inno Setup](https://jrsoftware.org/isinfo.php).
 
-CI ([`build.yml`](.github/workflows/build.yml)) builds AU and VST3 for Apple Silicon and Intel and the VST3 for Windows x64, runs the DSP checks on every platform and validates the Audio Unit with `auval`. [`release.yml`](.github/workflows/release.yml) publishes the macOS plugin zips and the Windows installer.
+CI ([`build.yml`](.github/workflows/build.yml)) builds AU and VST3 for Apple Silicon and Intel and the VST3 for Windows x64, runs the DSP checks on every platform, validates the Audio Unit with `auval` and all plugin formats with [pluginval](https://github.com/Tracktion/pluginval) at strictness 10. [`release.yml`](.github/workflows/release.yml) publishes the macOS plugin zips and the Windows installer.
 
 The logo masters come from `design/logo/make.py`, the README art from `design/banners/render.sh` (headless Chrome) and the theme from `design/theme/tokens.css` (mirrored in `Source/DesignTokens.h`).
 

@@ -25,7 +25,7 @@ Non-goals: polyphonic correction, graphical note editing (Melodyne-style), cloud
 | Windows | VST3 x64, Inno Setup installer (`build/windows/snapline.iss`) |
 | Codes | Manufacturer `SNPL`, plugin `SNL1`, bundle ID `audio.snapline.pitchcorrection` |
 | Buses | Mono→mono or stereo→stereo (`isBusesLayoutSupported`) |
-| CI | `.github/workflows/build.yml`: macOS arm64/x86_64 (AU+VST3, DSP checks, `auval -strict`), Windows x64 (VST3, DSP checks, installer). `release.yml`: manual SemVer release with macOS plugin zips, the Windows installer and a Windows VST3 zip. Same shape and runners as Axiom/Prism. |
+| CI | `.github/workflows/build.yml`: macOS arm64/x86_64 (AU+VST3, DSP and plugin checks, `auval -strict`, pluginval strictness 10 on AU and VST3), Windows x64 (VST3, DSP checks, pluginval strictness 10, installer). `release.yml`: manual SemVer release with macOS plugin zips, the Windows installer and a Windows VST3 zip. Same shape and runners as Axiom/Prism. |
 
 ## 3. Module map
 
@@ -190,6 +190,6 @@ Also run: `auval -strict -v aumf SNL1 SNPL`, `SnaplineSnapshot docs/screenshots`
 3. ~~**Completeness**~~ (done: soft `bypass` parameter exposed through `getBypassParameter`; user presets as XML in the application-data folder, saved and loaded on the message thread; resizable editor 75–150 %; accessibility titles for every control. Checked by `SnaplineRender` (bypass) and `SnaplineSnapshot --check` (presets, state, sizes, titles, tooltips). Known gap: the note strip is mouse-only and the Live/Studio and Dark/Light switches take left/right keys but show no focus ring.)
 
    *User presets*: `~/Library/Application Support/Snapline/Presets/*.xml` on macOS, `%APPDATA%\Snapline\Presets` on Windows. A file is `<SnaplinePreset version="1" name="…">` with one `<Param id value/>` per correction-style parameter (the same 11 a factory preset sets; never key, scale, input type, mode, MIDI, mix, output or bypass). File names are sanitised; unknown IDs in a file are ignored.
-4. **Validation**: add [pluginval](https://github.com/Tracktion/pluginval) (strictness 10) for AU and VST3 on macOS and VST3 on Windows in `build.yml`; confirm the Windows jobs and installer on GitHub.
+4. **Validation**: [pluginval](https://github.com/Tracktion/pluginval) (`v1.0.3`, strictness 10, `--validate-in-process`) is in `build.yml` for AU and VST3 on macOS and VST3 on Windows. **Not yet run:** neither pluginval nor the Windows jobs and installer have run on GitHub (nothing was run from the authoring machine; the workflow YAML was only syntax-checked). Next: watch the first run, fix whatever pluginval reports, and confirm the Windows installer.
 
 Each change: keep the rules in `AGENTS.md`, update `HOW_IT_WORKS.md`, README tables and screenshots when behaviour or UI changes, and keep "All checks passed."
