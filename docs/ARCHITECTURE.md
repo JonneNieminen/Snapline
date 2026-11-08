@@ -172,7 +172,7 @@ CPU, measured by `SnaplineRender` (wall time of the engine alone, Release, one A
 |---|---|---|
 | Melody with pauses (Studio / Live) | 1.14 % / 1.14 % | 0.60 % / 0.59 % |
 | Continuous voice (no pauses) | 1.34 % | 0.71 % |
-| 44.1 kHz / 96 kHz (melody) | 1.2 % / 2.4 % | 0.6 % / 1.2 % |
+| 44.1 kHz / 96 kHz (melody) | 0.6 % / 2.4 % | 0.6 % / 1.2 % |
 
 Where it went: YIN used one 4096-point FFT size for every input type (now the smallest power of two that fits 2·W: 2048 for Alto/Tenor, 1024 for Soprano); quiet frames skip the FFT; grain windows come from a 1024-entry table (symmetric, so overlapping grains still sum to one) instead of a `cos` per sample; grains at an unchanged formant factor use constant 4-tap Hermite weights (or plain copies when the read position is integral); grains cut from digitally silent input are skipped; with Mix at 0 the resynthesis is skipped (tracking continues for the display). Accuracy, null and latency numbers did not change.
 
