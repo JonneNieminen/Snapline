@@ -26,6 +26,7 @@ struct SnaplineParams
     float vibratoDepth = 0.0f;      // cents (peak)
     float vibratoRate = 5.5f;       // Hz
     float vibratoOnsetMs = 250.0f;  // delay after a note starts
+    float naturalVibrato = 0.0f;    // %: -100 removes the singer's own vibrato, 0 keeps it, +100 doubles it
     bool preserveFormants = true;
     float formantShift = 0.0f;      // semitones
     float throat = 100.0f;          // % of natural throat length

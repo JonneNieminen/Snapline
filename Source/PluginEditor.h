@@ -111,7 +111,7 @@ private:
     juce::ToggleButton preserveFormants { "Preserve formants" };
 
     ParameterRow retune, humanize, tolerance, amount;
-    ParameterRow vibratoDepth, vibratoRate, vibratoOnset;
+    ParameterRow vibratoDepth, vibratoRate, vibratoOnset, naturalVibrato;
     ParameterRow formantShift, throat, transpose;
     ParameterRow mix, output, reference;
 

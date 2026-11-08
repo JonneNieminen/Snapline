@@ -31,6 +31,8 @@ constexpr float voicedHoldAperiodicity = 0.35f;
 constexpr float gateRms = 0.001f;         // -60 dBFS
 constexpr float relativeGate = 0.08f;     // -22 dB below the recent vocal level
 constexpr double holdSeconds = 0.03;      // bridge short detection dropouts inside a note
+constexpr float centreHz = 3.0f;          // cut-off of the slow pitch centre
+constexpr float maxDeviation = 60.0f;     // cents the pitch may stray from its centre before it drags it along
 constexpr int markCapacity = 8192;
 constexpr int frameCapacity = 4096;
 constexpr int displayCapacity = 4096;
@@ -110,6 +112,8 @@ struct SnaplineDsp::Impl
     double noteAge = 0.0;
     float correction = 0.0f;
     double vibratoPhase = 0.0;
+    float centreA = 0.0f, centreB = 0.0f; // two cascaded 3 Hz poles: the singer's slow pitch centre (cents)
+    bool centreValid = false;
 
     // Output smoothing
     float mixSmoothed = 1.0f, gainSmoothed = 1.0f;
@@ -160,6 +164,8 @@ struct SnaplineDsp::Impl
         noteAge = 0.0;
         correction = 0.0f;
         vibratoPhase = 0.0;
+        centreA = centreB = 0.0f;
+        centreValid = false;
         applyMode (mode);
         synthPos = (double) latency;
         extraDelay = 0.0;
@@ -305,7 +311,10 @@ struct SnaplineDsp::Impl
                 continue;
             }
             const int half = juce::jmax (1, (int) (period * 0.25f));
-            if (candidate + half >= now)
+            const int reach = juce::jmax (1, (int) (period * 0.10f));
+            const int span = juce::jmax (4, (int) (period * 0.33f));
+            // The refinement below looks `reach + span` further ahead than the peak search.
+            if (candidate + half + reach + span + 4 >= now)
                 return;
             // Peak of the low-passed signal near the expected position, weighted
             // towards it so the marks keep a steady phase within each period.
@@ -324,8 +333,79 @@ struct SnaplineDsp::Impl
                     best = i;
                 }
             }
-            pushMark (juce::jmax (last + 2, best), true);
+            if (mark (markCount - 1).voiced)
+                best = refineMark (last, best, reach, span);
+            pushMark (juce::jmax (last + juce::jmax (2, (int) (period * 0.5f)), best), true);
         }
+    }
+
+    /**
+        Move a mark to where the waveform best repeats the one before it: normalised
+        cross-correlation of the low-passed signal around the previous mark and around each
+        candidate within +-reach. A mild preference for the peak position keeps marks from
+        wandering. Breathy and low voices have flat, noisy peaks; the waveform shape is far
+        more reliable than the peak, so the periods stop jittering.
+    */
+    std::int64_t refineMark (std::int64_t last, std::int64_t best, int reach, int span) const
+    {
+        const int stride = juce::jlimit (1, 8, juce::jmin ((int) (fs / 8000.0), span / 6));
+        float refEnergy = 0.0f;
+        for (int k = -span; k <= span; k += stride)
+        {
+            const float v = lowpassed[(size_t) ((last + k) & ringMask)];
+            refEnergy += v * v;
+        }
+        if (refEnergy < 1.0e-10f)
+            return best;
+        auto winner = best;
+        float winnerScore = -2.0f;
+        for (auto q = best - reach; q <= best + reach; ++q)
+        {
+            float cross = 0.0f, energy = 0.0f;
+            for (int k = -span; k <= span; k += stride)
+            {
+                const float a = lowpassed[(size_t) ((last + k) & ringMask)];
+                const float b = lowpassed[(size_t) ((q + k) & ringMask)];
+                cross += a * b;
+                energy += b * b;
+            }
+            const float score = cross / std::sqrt (refEnergy * energy + 1.0e-20f)
+                                * (1.0f - 0.25f * (float) std::abs (q - best) / (float) reach);
+            if (score > winnerScore)
+            {
+                winnerScore = score;
+                winner = q;
+            }
+        }
+        return winner;
+    }
+
+    /** 0 at a voiced/unvoiced edge rising to 1 over ~5 ms (at least one grain) into the voiced side. */
+    float edgeFade (std::int64_t j, double grainLength) const
+    {
+        const auto& m = mark (j);
+        const double edge = std::max (0.005 * fs, 1.5 * grainLength);
+        double nearest = edge;
+        for (int k = 1; k <= 8; ++k)
+        {
+            if (j - k >= oldestMark())
+            {
+                const auto& o = mark (j - k);
+                const double d = (double) (m.pos - o.pos);
+                if (d >= edge) break;
+                if (o.voiced != m.voiced) { nearest = std::min (nearest, d); break; }
+            }
+            else break;
+        }
+        for (int k = 1; k <= 8; ++k)
+        {
+            if (j + k >= markCount) break;
+            const auto& o = mark (j + k);
+            const double d = (double) (o.pos - m.pos);
+            if (d >= edge) break;
+            if (o.voiced != m.voiced) { nearest = std::min (nearest, d); break; }
+        }
+        return smoothstep (0.0f, 1.0f, (float) (nearest / edge));
     }
 
     // ------------------------------------------------------------------ correction
@@ -366,6 +446,7 @@ struct SnaplineDsp::Impl
             correction += (0.0f - correction) * (1.0f - std::exp (-dt / 0.05f));
             currentNote = -1;
             noteAge = 0.0;
+            centreValid = false;
             f.shiftCents = 0.0f;
             lastShift = 0.0f;
             pushDisplay ({ 0.0f, 0.0f, 0.0f, -1 });
@@ -406,22 +487,55 @@ struct SnaplineDsp::Impl
             if (toCurrent < toTarget + 25.0f && toCurrent < 100.0f)
                 target = currentNote;
         }
+        bool reseed = ! centreValid;
         if (target != currentNote)
         {
             currentNote = target;
             noteAge = 0.0;
             vibratoPhase = 0.0;
+            reseed = true;
         }
 
-        float desired = 0.0f;
+        // The singer's slow pitch centre: two 3 Hz poles, restarted on every onset and note
+        // change. Vibrato and micro-movement sit around it and are left alone.
+        if (reseed)
+        {
+            centreA = centreB = median;
+            centreValid = true;
+        }
+        else
+        {
+            const float a = 1.0f - std::exp (-(float) twoPi * centreHz * dt);
+            centreA += a * (measured - centreA);
+            centreB += a * (centreA - centreB);
+            centreA = juce::jlimit (measured - maxDeviation, measured + maxDeviation, centreA);
+            centreB = juce::jlimit (measured - maxDeviation, measured + maxDeviation, centreB);
+        }
+
+        // Early in a note the reference is the instantaneous pitch (the centre has not settled
+        // and a scoop would otherwise read as vibrato); it blends to the slow centre over
+        // the next 120-350 ms, which is also when a real vibrato starts.
+        const float centreWeight = smoothstep (0.12f, 0.35f, (float) noteAge);
+        const float reference = measured + centreWeight * (centreB - measured);
+        const float deviation = centreWeight * (measured - centreB);
+
+        float desired = 0.0f, fullError = 0.0f;
         if (target >= 0)
         {
             const float targetCents = (float) target * 100.0f;
-            desired = targetCents - measured;
+            desired = targetCents - reference;
             if (p.tolerance > 0.0f && p.forceNote < 0)
             {
                 const float zone = 50.0f - 0.45f * p.tolerance;
                 desired *= 1.0f - smoothstep (zone, zone + 20.0f, std::abs (median - targetCents));
+            }
+            fullError = desired;
+            // Onset ramp: a scoop or attack keeps its shape while the correction fades in over
+            // 20-80 ms (longer with Humanize). Instant retune stays instant.
+            if (p.retuneMs > 0.0f)
+            {
+                const float rampSeconds = (0.020f + 0.060f * p.humanize * 0.01f) * juce::jmin (1.0f, p.retuneMs / 20.0f);
+                desired *= smoothstep (0.0f, rampSeconds, (float) noteAge);
             }
         }
 
@@ -430,7 +544,12 @@ struct SnaplineDsp::Impl
             tau += p.humanize * 0.01f * 0.25f * smoothstep (0.12f, 0.52f, (float) noteAge);
         const float alpha = tau <= 0.0005f ? 1.0f : 1.0f - std::exp (-dt / tau);
         correction += (desired - correction) * alpha;
-        const float applied = correction * p.amount * 0.01f;
+        // Never correct past the note: a slow correction that built up while the singer was
+        // rising on their own (a scoop) is released as soon as they arrive.
+        if ((fullError > 0.0f && correction > fullError) || (fullError < 0.0f && correction < fullError))
+            correction = fullError;
+        const float correctionOnly = correction * p.amount * 0.01f;
+        const float applied = correctionOnly + p.naturalVibrato * 0.01f * deviation * p.amount * 0.01f;
 
         float vibrato = 0.0f;
         if (p.vibratoDepth > 0.0f && target >= 0)
@@ -444,7 +563,7 @@ struct SnaplineDsp::Impl
         f.shiftCents = applied + vibrato + p.transpose * 100.0f;
         lastShift = f.shiftCents;
         noteAge += dt;
-        pushDisplay ({ f.hz, f.hz * std::exp2 (f.shiftCents / 1200.0f), applied, target });
+        pushDisplay ({ f.hz, f.hz * std::exp2 (f.shiftCents / 1200.0f), correctionOnly, target });
     }
 
     void pushDisplay (const DisplayFrame& d)
@@ -529,7 +648,7 @@ struct SnaplineDsp::Impl
         const double maxHalf = (double) maxWindow;
         g.left = juce::jlimit (2.0, maxHalf, g.left);
         g.right = juce::jlimit (2.0, maxHalf, g.right);
-        const float shift = m.voiced ? juce::jlimit (-2400.0f, 2400.0f, shiftAt (m.pos)) : 0.0f;
+        const float shift = m.voiced ? juce::jlimit (-2400.0f, 2400.0f, shiftAt (m.pos)) * edgeFade (j, g.right) : 0.0f;
         g.ratio = std::exp2 ((double) shift / 1200.0);
         const double character = std::exp2 ((double) p.formantShift / 12.0) * (100.0 / juce::jlimit (50.0, 200.0, (double) p.throat));
         g.formant = juce::jlimit (0.5, 2.0, (p.preserveFormants ? 1.0 : g.ratio) * character);

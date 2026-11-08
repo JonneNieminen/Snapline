@@ -17,6 +17,7 @@ constexpr auto referenceId = "reference";
 constexpr auto vibDepthId = "vibratoDepth";
 constexpr auto vibRateId = "vibratoRate";
 constexpr auto vibOnsetId = "vibratoOnset";
+constexpr auto naturalVibId = "naturalVibrato";
 constexpr auto preserveId = "preserveFormants";
 constexpr auto formantId = "formantShift";
 constexpr auto throatId = "throat";
@@ -27,10 +28,13 @@ juce::String noteId (int pitchClass) { return "note" + juce::String (pitchClass)
 
 /** Parameters a factory preset sets; moving one marks the preset as modified. */
 const juce::StringArray presetParameterIds { retuneId, humanizeId, toleranceId, amountId, vibDepthId, vibRateId,
-                                             vibOnsetId, preserveId, formantId, throatId };
+                                             vibOnsetId, naturalVibId, preserveId, formantId, throatId };
 
 juce::String formatValue (float value, const char* unit, int decimals)
 {
+    // Whole numbers go through an integer: String (float, 0) prints values like 1.5e-8 in exponent form.
+    if (decimals <= 0)
+        return juce::String (juce::roundToInt (value)) + unit;
     const auto text = juce::String (value, decimals);
     const auto clean = text.containsOnly ("-0.") ? text.trimCharactersAtStart ("-") : text;
     return clean + unit;
@@ -81,6 +85,7 @@ SnaplineAudioProcessor::SnaplineAudioProcessor()
     raw.vibratoDepth = get (vibDepthId);
     raw.vibratoRate = get (vibRateId);
     raw.vibratoOnset = get (vibOnsetId);
+    raw.naturalVibrato = get (naturalVibId);
     raw.preserveFormants = get (preserveId);
     raw.formantShift = get (formantId);
     raw.throat = get (throatId);
@@ -136,6 +141,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout SnaplineAudioProcessor::crea
     p.add (std::make_unique<Float> (juce::ParameterID { vibDepthId, 1 }, "Vibrato Depth", Range (0.0f, 100.0f, 0.1f), 0.0f, withUnit (" ct", 0)));
     p.add (std::make_unique<Float> (juce::ParameterID { vibRateId, 1 }, "Vibrato Rate", Range (2.0f, 9.0f, 0.01f), 5.5f, withUnit (" Hz", 1)));
     p.add (std::make_unique<Float> (juce::ParameterID { vibOnsetId, 1 }, "Vibrato Onset", Range (0.0f, 1000.0f, 1.0f), 250.0f, withUnit (" ms", 0)));
+    p.add (std::make_unique<Float> (juce::ParameterID { naturalVibId, 1 }, "Natural Vibrato", Range (-100.0f, 100.0f, 0.1f), 0.0f, withUnit ("%", 0)));
     p.add (std::make_unique<Bool> (juce::ParameterID { preserveId, 1 }, "Preserve Formants", true));
     p.add (std::make_unique<Float> (juce::ParameterID { formantId, 1 }, "Formant Shift", Range (-6.0f, 6.0f, 0.1f), 0.0f, withUnit (" st", 1)));
     p.add (std::make_unique<Float> (juce::ParameterID { throatId, 1 }, "Throat Length", Range (60.0f, 160.0f, 0.1f), 100.0f, withUnit ("%", 0)));
@@ -237,6 +243,7 @@ snapline::SnaplineParams SnaplineAudioProcessor::readParameters()
     p.vibratoDepth = read (raw.vibratoDepth);
     p.vibratoRate = read (raw.vibratoRate);
     p.vibratoOnsetMs = read (raw.vibratoOnset);
+    p.naturalVibrato = read (raw.naturalVibrato);
     p.preserveFormants = read (raw.preserveFormants) >= 0.5f;
     p.formantShift = read (raw.formantShift);
     p.throat = read (raw.throat);
@@ -293,6 +300,7 @@ void SnaplineAudioProcessor::setCurrentProgram (int index)
     setParameterValue (parameters, vibDepthId, v.vibratoDepth);
     setParameterValue (parameters, vibRateId, v.vibratoRate);
     setParameterValue (parameters, vibOnsetId, v.vibratoOnsetMs);
+    setParameterValue (parameters, naturalVibId, v.naturalVibrato);
     setParameterValue (parameters, preserveId, v.preserveFormants ? 1.0f : 0.0f);
     setParameterValue (parameters, formantId, v.formantShift);
     setParameterValue (parameters, throatId, v.throat);

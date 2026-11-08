@@ -88,6 +88,7 @@ Then rescan plugins in your DAW. In Logic Pro, Snapline is under **Audio Units �
 | **Tolerance** | Only corrects notes the singer is close to; higher values leave more untouched. |
 | **Amount** | How much of the correction is applied. |
 | **Vibrato depth · rate · onset** | Synthetic vibrato on held notes, fading in after the onset time. |
+| **Natural** | The singer's own vibrato: 0 % keeps it as sung, −100 % flattens it, +100 % doubles it. |
 | **Formant** | Moves the voice's character up or down without changing pitch (±6 st). |
 | **Throat** | Models a longer, darker (above 100 %) or shorter, brighter throat. |
 | **Preserve formants** | On: natural voice at any pitch. Off: formants follow the pitch. |

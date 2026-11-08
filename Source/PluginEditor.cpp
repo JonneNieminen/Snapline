@@ -334,6 +334,7 @@ SnaplineAudioProcessorEditor::SnaplineAudioProcessorEditor (SnaplineAudioProcess
       vibratoDepth (p.parameters, "vibratoDepth", "Depth", "Adds vibrato to held notes, in cents either side of the note."),
       vibratoRate (p.parameters, "vibratoRate", "Rate", "Vibrato speed."),
       vibratoOnset (p.parameters, "vibratoOnset", "Onset", "How long a note is held before the vibrato fades in."),
+      naturalVibrato (p.parameters, "naturalVibrato", "Natural", "The singer's own vibrato. 0 % keeps it as sung, -100 % flattens it, +100 % doubles it."),
       formantShift (p.parameters, "formantShift", "Formant", "Moves the voice's character (its formants) up or down without changing the pitch."),
       throat (p.parameters, "throat", "Throat", "Models a longer (darker) or shorter (brighter) throat. 100 % is natural."),
       transpose (p.parameters, "transpose", "Transpose", "Shifts the corrected pitch by semitones."),
@@ -403,7 +404,7 @@ SnaplineAudioProcessorEditor::SnaplineAudioProcessorEditor (SnaplineAudioProcess
     preserveAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (state, "preserveFormants", preserveFormants);
     addAndMakeVisible (preserveFormants);
 
-    for (auto* row : { &retune, &humanize, &tolerance, &amount, &vibratoDepth, &vibratoRate, &vibratoOnset,
+    for (auto* row : { &retune, &humanize, &tolerance, &amount, &vibratoDepth, &vibratoRate, &vibratoOnset, &naturalVibrato,
                        &formantShift, &throat, &transpose, &mix, &output, &reference })
         addAndMakeVisible (row);
 
@@ -432,7 +433,7 @@ void SnaplineAudioProcessorEditor::applyTheme()
     noteStrip.setPalette (&colours);
     modeSwitch.setPalette (&colours);
     themeSwitch.setPalette (&colours);
-    for (auto* row : { &retune, &humanize, &tolerance, &amount, &vibratoDepth, &vibratoRate, &vibratoOnset,
+    for (auto* row : { &retune, &humanize, &tolerance, &amount, &vibratoDepth, &vibratoRate, &vibratoOnset, &naturalVibrato,
                        &formantShift, &throat, &transpose, &mix, &output, &reference })
         row->setPalette (&colours);
     sendLookAndFeelChange();
@@ -594,7 +595,7 @@ void SnaplineAudioProcessorEditor::resized()
         }
     };
     layoutRows (cards[0], { &retune, &humanize, &tolerance, &amount });
-    layoutRows (cards[1], { &vibratoDepth, &vibratoRate, &vibratoOnset });
+    layoutRows (cards[1], { &vibratoDepth, &vibratoRate, &vibratoOnset, &naturalVibrato });
     layoutRows (cards[2], { &formantShift, &throat, &transpose });
     layoutRows (cards[3], { &mix, &output, &reference });
     preserveFormants.setBounds (cards[2].getRight() - 18 - 170, cards[2].getY() + 12, 170, 24);

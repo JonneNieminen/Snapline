@@ -85,6 +85,7 @@ private:
         std::atomic<float>* vibratoDepth = nullptr;
         std::atomic<float>* vibratoRate = nullptr;
         std::atomic<float>* vibratoOnset = nullptr;
+        std::atomic<float>* naturalVibrato = nullptr;
         std::atomic<float>* preserveFormants = nullptr;
         std::atomic<float>* formantShift = nullptr;
         std::atomic<float>* throat = nullptr;

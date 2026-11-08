@@ -78,21 +78,24 @@ All sample positions are absolute `int64` counters into power-of-two rings sized
 
 ### 5.2 Correction (per frame)
 1. **Note decision**: median of neighbouring frames (Live: last 3; Studio: ±3 with 8-frame look-ahead) → nearest allowed note; 25-cent hysteresis; MIDI *force* overrides.
-2. **Raw correction** = target − measured (single-frame outliers > 70 ct replaced by the median).
+2. **Raw correction** = target − *reference* (single-frame outliers > 70 ct replaced by the median). The reference is the instantaneous pitch for the first 120 ms of a note and blends to the singer's **slow pitch centre** by 350 ms. The centre is two cascaded 3 Hz one-pole low-passes of the measured pitch, restarted on every onset and note change and kept within 60 ct of the pitch. Vibrato and micro-movement sit around the centre, so they pass through at any retune speed.
 3. **Tolerance**: fade the correction out when the singer is more than `50 − 0.45·tolerance` cents (+20 ct soft edge) from the target.
 4. **Retune speed**: one-pole smoothing of the *correction* (τ = retune ms; 0 = instant). Smoothing the correction rather than the pitch is what lets vibrato through at slow speeds.
 5. **Humanize**: τ grows by up to 250 ms × humanize % on notes held longer than 0.12 s (ramp to 0.52 s).
-6. **Amount** scales; **Vibrato** (depth, rate, onset with 250 ms fade-in) and **Transpose** are added.
+6. **Onset ramp**: the wanted correction is scaled by a smoothstep over `(20 + 60·humanize %) ms` (× min(1, retune / 20 ms), so 0 ms stays instant) after every voiced onset or note change, so scoops and attacks keep their shape.
+7. **No overshoot**: the smoothed correction never exceeds the current error, so a correction built up during a scoop is released as soon as the singer arrives.
+8. **Natural vibrato** adds `naturalVibrato % × (measured − centre)`: −100 flattens the singer's own vibrato, 0 keeps it, +100 doubles it. **Amount** scales the correction and this term; synthetic **Vibrato** (depth, rate, onset with 250 ms fade-in) and **Transpose** are added.
 7. Output: `shiftCents` per frame, and a `DisplayFrame` for the UI.
 
 ### 5.3 Pitch marks
-One mark per period at the peak of the low-passed signal within ±P/4 of `last + P`, weighted towards the expected position (keeps a steady phase). Unvoiced regions get marks every `fs/180` samples.
+One mark per period at the peak of the low-passed signal within ±P/4 of `last + P`, weighted towards the expected position (keeps a steady phase). The peak is then **refined** within ±0.1 P by normalised cross-correlation of the low-passed waveform around the candidate with the waveform around the previous mark (strided, ≈ 1 k multiply-adds per mark). Waveform shape is far more reliable than a flat, noisy peak on low and breathy voices. Unvoiced regions get marks every `fs/180` samples.
 
 ### 5.4 Resynthesis (TD-PSOLA)
 - Grain `j`: centred on mark `a_j`, asymmetric Hann halves of `a_j − a_{j−1}` and `a_{j+1} − a_j` (perfect reconstruction at ratio 1).
 - Synthesis positions advance by `(a_{j+1} − a_j) / ratio`; the grain for synthesis time `s` is the mark nearest `u = s − latency − extraDelay`.
 - **Formant / Throat**: grains are read at `a_j + d·φ` (φ = 2^(formant/12) · 100/throat, × ratio when *Preserve formants* is off; φ clamped to 0.5–2). Grains are stretched (never shortened) so overlap stays ≥ 50 %.
 - Overlap-add into `acc`/`win` rings; output = `acc / max(win, 0.5)`; 4-point Hermite interpolation for fractional reads.
+- **Voiced/unvoiced edges**: the shift of a voiced grain fades in with a smoothstep over max(5 ms, 1.5 grains) from the nearest unvoiced mark, so grains at the shifted and the unshifted period cross over smoothly instead of switching (no buzz on consonants).
 - Ratio from `shiftAt(a_j)`: linear interpolation between decided frames; in Live mode, a short (≤ 15 ms, ±40 ct) extrapolation beyond the newest frame.
 
 ### 5.5 Latency model
@@ -120,6 +123,7 @@ Dry (delayed by `latency`, per channel) / wet (mono) mix and output gain, both s
 | `transpose` | Transpose | −12…12 st | 0 |
 | `reference` | A4 Reference | 415–466 Hz | 440 |
 | `vibratoDepth` / `vibratoRate` / `vibratoOnset` | Vibrato | 0–100 ct / 2–9 Hz / 0–1000 ms | 0 / 5.5 / 250 |
+| `naturalVibrato` | Natural Vibrato | −100…+100 % (flatten … keep … double the singer's own vibrato) | 0 |
 | `preserveFormants` | Preserve Formants | bool | on |
 | `formantShift` | Formant Shift | −6…6 st | 0 |
 | `throat` | Throat Length | 60–160 % | 100 |
@@ -148,6 +152,20 @@ New parameters get new IDs (version 1 in `juce::ParameterID`). Never rename or r
 | Level change | < 1.5 dB | < 0.1 dB |
 | CPU (one core, 48 kHz) | > 10× real time; goal ≤ 1 % | ≈ 87× (≈ 1.15 %) |
 
+Human-by-default checks (Studio and Live, 44.1 / 48 / 96 kHz; synthetic 40 ct vibrato at 5.6 Hz, scoop 100 ct flat rising in 120 ms, noise bursts abutting notes, breathy low voice at noise 0.6):
+
+| Check | Target | Before | Now |
+|---|---|---|---|
+| Vibrato kept at retune 5 ms | ≥ 70 % of input depth | 34 % | 116 % |
+| `naturalVibrato` −100 % / +100 % | ≤ 30 % / ≥ 150 % | – | ≈ 21 % / ≈ 226 % |
+| Scoop dip kept at +30…50 ms (Natural speeds) | ≥ 60 % | 68 % Studio, 43–47 % Live | 92 % / 92–95 % |
+| Click index at voiced/unvoiced edges | ≤ 1.5 × input + 1 | 4.2 (input 4.6) | 4.5 (input 4.4–4.6) |
+| Period jitter, low breathy voice, pulled 35 ct | ≤ input + 1 % | 0.54 % Studio, 1.00 % Live (input 0.76 %) | 0.53 % / 0.66 % |
+| Natural preset error (mean, 48 kHz) | ≤ ½ input | 5.5 ct vs 27 ct | 6.2 ct vs 27 ct (vibrato now kept) |
+| Hard tune (mean, 48 kHz) | < 4 ct | 1.06 / 1.12 ct | 1.09 / 1.16 ct |
+
+The tracked vibrato is above 100 % because the two-pole centre leaks about a quarter of a 5.6 Hz vibrato with a phase lag. Live delay is now 8–22 ms (about 2 ms more: the mark refinement looks further ahead). CPU was unchanged (≈ 88× real time at 48 kHz).
+
 Also run: `auval -strict -v aumf SNL1 SNPL`, `SnaplineSnapshot docs/screenshots` after UI changes, and a listen to the WAVs `SnaplineRender renders` writes.
 
 ## 9. Status and next work
@@ -156,12 +174,7 @@ Also run: `auval -strict -v aumf SNL1 SNPL`, `SnaplineSnapshot docs/screenshots`
 
 **Next (in priority order):**
 
-1. **More human by default**
-   - *Natural vibrato*: correct towards the note using the singer's slow pitch centre (≈ 3 Hz low-pass of the measured pitch) instead of the instantaneous pitch, so vibrato and micro-movement pass through untouched even at fast retune speeds. Add a `naturalVibrato` parameter (−100…+100 %: reduce or exaggerate the singer's own vibrato).
-   - *Onset handling*: let note attacks keep their scoop: ramp the correction in over a short, Humanize-dependent window (≈ 20–80 ms) after a voiced onset or note change.
-   - *Pitch-mark robustness*: refine marks by cross-correlating with the previous period (or glottal-closure-instant detection) to remove jitter/roughness on low and breathy voices.
-   - *Voiced/unvoiced edges*: crossfade between shifted and unshifted grains over ~5 ms at transitions to avoid buzz on consonants.
-   - Add render checks for each: retained vibrato depth (Natural ≥ 70 % of input), preserved scoop shape, no clicks at transitions (bounded spectral flux), output period jitter ≤ input + 1 %.
+1. ~~**More human by default**~~ (done: natural vibrato with a `naturalVibrato` parameter, onset ramp, cross-correlation mark refinement, voiced/unvoiced edge fade, and render checks for each; see section 8. Factory presets set `naturalVibrato` to 0 except Hard Tune and Robot (−100). Sessions saved before this change load with the new parameter at 0, so vibrato now passes through at their retune speeds.)
 2. **Efficiency**: window lookup tables instead of per-sample `cos`; skip Hermite when the read position is integral; early-out on digital silence and on `mix = 0`; keep the YIN FFT size minimal per input type. Profile one instance with Instruments and record the figure in this file. Goal ≤ 1 % of a core at 48 kHz on Apple silicon.
 3. **Completeness**: a soft *Bypass* parameter (latency-compensated crossfade, `getBypassParameter`); user presets saved as XML in the user's application-data folder, loaded and saved on the message thread; resizable editor (75–150 % scale); keyboard and accessibility titles for every control.
 4. **Validation**: add [pluginval](https://github.com/Tracktion/pluginval) (strictness 10) for AU and VST3 on macOS and VST3 on Windows in `build.yml`; confirm the Windows jobs and installer on GitHub.

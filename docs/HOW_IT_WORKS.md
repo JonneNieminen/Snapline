@@ -14,15 +14,15 @@ Snapline corrects a monophonic vocal in three stages: it **tracks** the pitch, *
 For every voiced frame:
 
 1. A median over neighbouring frames picks the **target note**: the nearest allowed note from the key and scale, the custom notes, or the held MIDI notes. *Force to held note* uses the held note's exact octave. A 25-cent hysteresis stops wobbles from flipping between two notes.
-2. The **correction** is the distance from the sung pitch to that note. *Tolerance* fades it out when the singer is far from the note.
-3. *Retune speed* smooths the correction with a one-pole filter (time constant = the retune time; 0 ms = instant). *Humanize* lengthens that time on notes held longer than about 120 ms.
-4. *Amount* scales the correction; *Vibrato* and *Transpose* are added on top.
+2. The **correction** is the distance from the note to where the singer *is*. For the first 120 ms of a note that is the instantaneous pitch; after that it is the singer's slow pitch centre (a 3 Hz low-pass), so the vibrato around the centre is not corrected away. *Tolerance* fades the correction out when the singer is far from the note.
+3. *Retune speed* smooths the correction with a one-pole filter (time constant = the retune time; 0 ms = instant). *Humanize* lengthens that time on notes held longer than about 120 ms. After every onset or note change the correction also fades in over 20-80 ms (longer with Humanize), so a scoop keeps its shape, and it never overshoots the note.
+4. *Natural vibrato* then scales the singer's own vibrato: -100 % flattens it, 0 % keeps it, +100 % doubles it. *Amount* scales the correction; *Vibrato* and *Transpose* are added on top.
 
 **Studio** mode decides each frame 8 frames (about 21 ms) late, so the note decision can look ahead. **Live** mode decides at once and briefly extrapolates the correction for audio that is newer than the last analysed frame.
 
 ## 3. Resynthesis (TD-PSOLA)
 
-- **Pitch marks** are placed once per period, on the peak of a low-passed copy of the signal near where the next period is expected. Unvoiced sound gets marks every 5.6 ms.
+- **Pitch marks** are placed once per period, on the peak of a low-passed copy of the signal near where the next period is expected. Unvoiced sound gets marks every 5.6 ms. Each mark is refined by cross-correlating the waveform with the one before it, which keeps low and breathy voices from turning rough. Near the edge of a voiced sound the shift fades in over about 5 ms, so consonants do not buzz.
 - Each output **grain** is two periods long, centred on a mark and Hann-windowed. Grains are overlap-added at the *target* period, so the pitch changes while each grain keeps the vocal tract's response: the formants stay where they were.
 - **Formant** and **Throat** resample the grains themselves (factor 0.5–2), which moves the formants without changing the pitch. With *Preserve formants* off, the grains are also resampled by the pitch ratio, so formants follow the pitch.
 - When correction is zero, grains are laid exactly where they came from and the output reconstructs the input (the Studio null test reaches about −150 dB).
@@ -39,6 +39,7 @@ A grain can only be built once a full period after its centre has arrived. **Stu
 - that natural settings at least halve the error
 - level, clipping and NaNs
 - the Studio null and its reported latency, and the Live delay range
+- vibrato kept or flattened by *Natural vibrato*, scoops kept and settled, no clicks or spectral jumps at voiced/unvoiced edges, and period jitter on a breathy low voice
 - transpose, MIDI forcing, formant shift, odd block sizes, silence and CPU cost
 
 ## Limits
