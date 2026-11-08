@@ -74,6 +74,8 @@ Download the file for your computer from [Releases](https://github.com/JonneNiem
 
 Then rescan plugins in your DAW. In Logic Pro, Snapline is under **Audio Units → Snapline Audio**.
 
+**FL Studio** loads the VST3 version, on Windows and on macOS. Open **Options → Manage plugins**, click **Find installed plugins**, then put Snapline on the vocal's mixer insert slot (the slot's arrow → *Select*, then pick Snapline from the list). I have not tested Snapline in FL Studio yet, so tell me if anything is off.
+
 ## Using Snapline
 
 1. Put Snapline on the vocal track's **first insert**, before compression and effects.

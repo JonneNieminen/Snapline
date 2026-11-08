@@ -15,7 +15,7 @@
     <choice id="au" visible="false" title="Audio Unit" description="Snapline for Logic Pro, GarageBand and MainStage.">
         <pkg-ref id="audio.snapline.pitchcorrection.au"/>
     </choice>
-    <choice id="vst3" visible="false" title="VST3" description="Snapline for Ableton Live, Reaper, Cubase, Bitwig, Studio One and other VST3 hosts.">
+    <choice id="vst3" visible="false" title="VST3" description="Snapline for FL Studio, Ableton Live, Reaper, Cubase, Bitwig, Studio One and other VST3 hosts.">
         <pkg-ref id="audio.snapline.pitchcorrection.vst3"/>
     </choice>
     <pkg-ref id="audio.snapline.pitchcorrection.au" version="@VERSION@" onConclusion="none">au.pkg</pkg-ref>
