@@ -1,0 +1,5 @@
+---
+description: Shared Snapline JUCE plugin development guidance
+alwaysApply: true
+---
+Follow the repository's [AGENTS.md](../../AGENTS.md) for architecture, real-time DSP safety, parameter compatibility, build steps, and design rules, and [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for the system design and next work. Do not duplicate project guidance in this rule.

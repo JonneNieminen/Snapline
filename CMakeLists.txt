@@ -4,6 +4,11 @@ project(Snapline VERSION 1.0.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Sources are UTF-8; MSVC otherwise reads them in the system code page.
+if (MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 set(JUCE_DIR "${CMAKE_CURRENT_LIST_DIR}/third_party/JUCE" CACHE PATH "Path to a JUCE checkout (JUCE 9.0.5 or newer)")
 if (NOT EXISTS "${JUCE_DIR}/CMakeLists.txt")
     message(FATAL_ERROR "JUCE was not found at ${JUCE_DIR}. Clone JUCE 9.0.5 into third_party/JUCE or set -DJUCE_DIR=/path/to/JUCE")

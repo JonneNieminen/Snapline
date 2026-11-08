@@ -20,7 +20,9 @@ Copy `build/Snapline_artefacts/Release/AU/Snapline.component` to `~/Library/Audi
 - After interface changes, run `build/SnaplineSnapshot_artefacts/Release/SnaplineSnapshot docs/screenshots` and check both themes.
 - Validate the AU with `auval -strict -v aumf SNL1 SNPL`.
 
-CI builds both formats for Apple Silicon and Intel, runs the DSP checks and `auval`.
+CI builds AU and VST3 for Apple Silicon and Intel and the VST3 plus installer on Windows x64, and runs the DSP checks and `auval`. On Windows, configure with `cmake -S . -B build -A x64 -DSNAPLINE_BUILD_TOOLS=ON` and build `Snapline_VST3` and `SnaplineRender` in `Release`.
+
+Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) before larger changes; its last section lists the next work.
 
 ## Guidelines
 

@@ -1,4 +1,6 @@
 #include "PitchGraph.h"
+#include <algorithm>
+#include <array>
 
 namespace
 {

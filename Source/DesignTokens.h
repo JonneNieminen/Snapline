@@ -5,6 +5,7 @@
     Design tokens: the only place colours are defined. They follow Prism's flat
     macOS style (solid surfaces, hairline borders, one calm accent) in dark and
     light. The vocal colour is Prism's vocal stem colour; it marks corrected pitch.
+    design/theme/tokens.css holds the same values for the README art; keep both in step.
 */
 namespace snapline::theme
 {
@@ -18,6 +19,7 @@ struct Palette
     juce::Colour danger, success, warning;
     juce::Colour tooltipBackground, tooltipText;
     juce::Colour lane, laneActive;
+    juce::Colour laneUpper, laneLower; // Prism's bass and drums stem colours (logo lanes)
     bool dark = true;
 };
 
@@ -47,6 +49,8 @@ inline Palette darkPalette()
     p.tooltipText = juce::Colour (0xff1c1c1e);
     p.lane = juce::Colour (0x08ffffff);
     p.laneActive = juce::Colour (0x147b82e0);
+    p.laneUpper = juce::Colour (0xff9d92e4);
+    p.laneLower = juce::Colour (0xffddb06a);
     p.dark = true;
     return p;
 }
@@ -77,6 +81,8 @@ inline Palette lightPalette()
     p.tooltipText = juce::Colour (0xfff5f5f7);
     p.lane = juce::Colour (0x07000000);
     p.laneActive = juce::Colour (0x125a60c8);
+    p.laneUpper = juce::Colour (0xff7166c4);
+    p.laneLower = juce::Colour (0xffb8862f);
     p.dark = false;
     return p;
 }

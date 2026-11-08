@@ -1,0 +1,154 @@
+<!doctype html>
+<!--
+  Repo imagery for Snapline, rendered to PNG by design/banners/render.sh (headless Chrome).
+  ?art=hero|social|tune|human|realtime|private  &theme=dark|light
+  Same layout and palette as Prism's design/banners/art.html, so the repos read as one family.
+-->
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  :root {
+    --bg: #15162b; --bg2: #1d1f3d; --text: #f4efe2; --muted: #a3a6c8; --faint: #6f7298; --card: #23264a; --line: rgba(255,255,255,.08);
+    --accent: #a3a8f0; --vocal: #e48aa0; --upper: #9d92e4; --lower: #ddb06a; --green: #a9c77e; --teal: #72c2b4; --blue: #7eaedf;
+    --sung: rgba(244,239,226,.55); --lane: rgba(255,255,255,.035); --soft: rgba(163,168,240,.12); --tile: #1f2144;
+  }
+  [data-theme="light"] {
+    --bg: #f5f5f8; --bg2: #ececf3; --text: #1d1f3d; --muted: #5d6080; --faint: #9a9cb5; --card: #ffffff; --line: rgba(20,20,60,.08);
+    --accent: #5a60c8; --vocal: #c95f78; --upper: #7166c4; --lower: #b8862f; --green: #789a46; --teal: #3e9a8b; --blue: #4b82bd;
+    --sung: rgba(29,31,61,.38); --lane: rgba(20,20,60,.035); --soft: rgba(90,96,200,.09);
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: -apple-system, "SF Pro Display", "Helvetica Neue", sans-serif; background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; overflow: hidden; }
+  .art { position: relative; overflow: hidden; background: var(--bg); }
+  .wm { font-weight: 600; letter-spacing: -0.035em; line-height: 1; }
+  .i { position: relative; display: inline-block; line-height: 1; }
+  .i b { position: absolute; left: 50%; top: 0.115em; width: 0.19em; height: 0.19em; border-radius: 50%; background: var(--accent); transform: translateX(-50%); }
+  .tag { color: var(--muted); letter-spacing: -0.01em; }
+  .pill { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 14px; border-radius: 10px; background: var(--card); border: 1px solid var(--line); color: var(--muted); font-size: 15px; font-weight: 500; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .card-title { font-size: 34px; font-weight: 600; letter-spacing: -0.02em; }
+  .card-sub { margin-top: 10px; font-size: 18px; color: var(--muted); line-height: 1.45; max-width: 480px; }
+  svg { display: block; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const q = new URLSearchParams(location.search);
+const art = q.get("art") || "hero";
+document.documentElement.dataset.theme = q.get("theme") || "dark";
+const C = (n) => `var(--${n})`;
+
+// The Snapline mark ("Snap"), 64-grid, as in design/logo/make.py.
+const WAVE = "M10 32C11.5 22 16.5 22 18 32S23.5 39 25 32S28.8 29 30 32S32 32.8 33 32";
+function mark(size, line, vocal, upper, lower) {
+  const lane = (d, y, c, r = 3) => `<path d="${d}" fill="none" stroke="${c}" stroke-width="4.5" stroke-linecap="round"/><circle cx="49" cy="${y}" r="${r}" fill="${c}"/>`;
+  return `<svg width="${size}" height="${size}" viewBox="0 0 64 64">
+    ${lane("M35 19H49", 19, upper)}${lane("M35 45H49", 45, lower)}${lane("M33 32H49", 32, vocal, 3.6)}
+    <path d="${WAVE}" fill="none" stroke="${line}" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+function appIcon(size) {
+  return `<div style="width:${size}px;height:${size}px;border-radius:${size * 0.225}px;background:var(--tile);box-shadow:0 ${size * 0.06}px ${size * 0.16}px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center">
+    ${mark(size, "#F4EFE2", "#E48AA0", "#5E5A94", "#7E6957")}</div>`;
+}
+const wordmark = (px) => `<span class="wm" style="font-size:${px}px">snapl<span class="i">ı<b></b></span>ne</span>`;
+
+// A sung line that wobbles, decays and snaps onto a straight lane at x = snapX.
+function snapLine(x0, snapX, x1, y, amp, cycles, color, width, sungColor) {
+  let d = `M${x0} ${y}`;
+  const n = 120;
+  for (let i = 1; i <= n; i++) {
+    const t = i / n, x = x0 + (snapX - x0) * t;
+    const a = amp * (1 - t) ** 1.6;
+    d += ` L${x.toFixed(1)} ${(y + a * Math.sin(t * cycles * Math.PI * 2)).toFixed(1)}`;
+  }
+  return `<path d="${d}" fill="none" stroke="${sungColor}" stroke-width="${width}" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M${snapX} ${y}H${x1}" fill="none" stroke="${color}" stroke-width="${width}" stroke-linecap="round"/>`;
+}
+
+// Pitch lanes leaving to the right: each a sung line snapping onto its note.
+function lanes(w, h, x0, y0, rows, spacing, stroke) {
+  const colors = ["upper", "vocal", "lower", "green", "blue", "teal"];
+  let s = "";
+  for (let i = 0; i < rows; i++) {
+    const y = y0 + (i - (rows - 1) / 2) * spacing;
+    const start = x0 + ((i * 37) % 90);
+    s += snapLine(start, start + 170, w + 40, y, spacing * 0.42, 3.2 + (i % 3) * 0.4, C(colors[i % colors.length]), stroke, "var(--sung)");
+  }
+  return `<svg width="${w}" height="${h}" style="position:absolute;inset:0">${s}</svg>`;
+}
+
+// Mini pitch display: semitone lanes, the sung line (grey) and the corrected one (vocal).
+function pitchPanel(w, h) {
+  const rows = 7, lh = h / rows;
+  let s = "";
+  const notes = [[0, 150, 5, 0.38], [170, 330, 3, -0.42], [350, w, 1, 0.32]];
+  const targets = notes.map((n) => n[2]);
+  for (let r = 0; r < rows; r++) s += `<rect x="0" y="${r * lh + 1}" width="${w}" height="${lh - 2}" rx="3" fill="${targets.includes(r) ? "var(--soft)" : (r % 2 ? "var(--lane)" : "transparent")}"/>`;
+  for (const [a, b, row, off] of notes) {
+    const y = row * lh + lh / 2;
+    let sung = `M${a} ${y + off * lh}`;
+    for (let x = a; x <= b; x += 4) sung += ` L${x} ${(y + off * lh + Math.sin(x / 9) * lh * 0.22).toFixed(1)}`;
+    let out = `M${a} ${y + off * lh}`;
+    for (let x = a; x <= b; x += 4) { const k = Math.min(1, (x - a) / 26); out += ` L${x} ${(y + off * lh * (1 - k) + Math.sin(x / 9) * lh * 0.22 * (1 - k) * 0.5).toFixed(1)}`; }
+    s += `<path d="${sung}" fill="none" stroke="var(--sung)" stroke-width="3" stroke-linecap="round"/>`;
+    s += `<path d="${out}" fill="none" stroke="var(--vocal)" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>`;
+  }
+  return `<svg width="${w}" height="${h}">${s}</svg>`;
+}
+
+function sliderRow(label, value, pos, color = "var(--accent)") {
+  return `<div style="display:flex;align-items:center;gap:16px;height:46px;padding:0 16px;border-radius:12px;background:var(--card);border:1px solid var(--line)">
+    <span style="width:110px;font-size:15px;font-weight:600">${label}</span>
+    <span style="position:relative;flex:1;height:5px;border-radius:3px;background:var(--line)">
+      <span style="position:absolute;left:0;top:0;bottom:0;width:${pos * 100}%;border-radius:3px;background:${color}"></span>
+      <span style="position:absolute;left:calc(${pos * 100}% - 9px);top:-7px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.35)"></span>
+    </span>
+    <span style="width:64px;text-align:right;font-size:14px;color:var(--muted)">${value}</span></div>`;
+}
+
+const root = document.getElementById("root");
+if (art === "hero" || art === "social") {
+  const W = 1280, H = art === "hero" ? 440 : 640;
+  root.innerHTML = `<div class="art" style="width:${W}px;height:${H}px">
+    ${lanes(W, H, 880, H / 2, 6, art === "hero" ? 46 : 62, 8)}
+    <div style="position:absolute;left:96px;top:0;bottom:0;display:flex;align-items:center;gap:44px">
+      ${appIcon(art === "hero" ? 208 : 248)}
+      <div>
+        ${wordmark(art === "hero" ? 104 : 124)}
+        <div class="tag" style="margin-top:22px;font-size:${art === "hero" ? 24 : 30}px;max-width:${art === "hero" ? 480 : 600}px">Real-time pitch correction that still sounds human. Audio Unit and VST3.</div>
+        <div style="margin-top:26px;display:flex;gap:10px">${[["Natural", "vocal"], ["Hard tune", "accent"], ["Live & Studio", "upper"], ["MIDI", "lower"]].map(([l, c]) => `<span class="pill"><span class="dot" style="background:${C(c)}"></span>${l}</span>`).join("")}</div>
+      </div>
+    </div>
+    <div style="position:absolute;right:0;top:0;bottom:0;width:120px;background:linear-gradient(90deg,transparent,var(--bg))"></div>
+  </div>`;
+} else {
+  const W = 640, H = 400;
+  const body = {
+    tune: {
+      title: "Tune in real time", sub: "Pull a vocal onto the key, by scale, by your own notes or by MIDI. From transparent polish to hard snap.",
+      art: `<div style="position:absolute;left:40px;right:40px;bottom:34px;height:170px;border-radius:14px;background:var(--card);border:1px solid var(--line);padding:14px 16px;overflow:hidden">${pitchPanel(528, 140)}</div>` },
+    human: {
+      title: "Still sounds human", sub: "Formant-preserving resynthesis, with Humanize, Tolerance and Retune speed to keep the performance.",
+      art: `<div style="position:absolute;left:40px;right:40px;bottom:34px;display:flex;flex-direction:column;gap:10px">
+        ${sliderRow("Retune speed", "60 ms", 0.42)}${sliderRow("Humanize", "50%", 0.5)}${sliderRow("Tolerance", "35%", 0.35)}</div>` },
+    realtime: {
+      title: "Light enough to leave on", sub: "About 1 % of one CPU core at 48 kHz. Live mode for tracking, Studio mode for the final pass.",
+      art: `<div style="position:absolute;left:40px;right:40px;bottom:40px;display:grid;grid-template-columns:repeat(2,1fr);gap:12px">${[["vocal", "Live", "8–20 ms, adapts to the voice"], ["accent", "Studio", "100 ms, compensated by the DAW"]].map(([c, n, f]) => `
+        <div style="height:132px;border-radius:14px;background:var(--card);border:1px solid var(--line);padding:16px;display:flex;flex-direction:column;justify-content:space-between">
+          <span style="width:30px;height:30px;border-radius:8px;background:${C(c)};opacity:.9"></span>
+          <div><div style="font-size:17px;font-weight:600">${n}</div><div style="margin-top:4px;font-size:14px;color:var(--muted)">${f}</div></div>
+        </div>`).join("")}</div>` },
+    private: {
+      title: "Private by design", sub: "Runs entirely inside your DAW. No uploads, accounts or telemetry. Open source.",
+      art: `<div style="position:absolute;left:40px;right:40px;bottom:40px;display:flex;gap:12px;flex-wrap:wrap">${["Runs locally", "Audio Unit", "VST3", "macOS", "Windows (VST3)", "Open source"].map((t) => `<span class="pill" style="height:40px;font-size:16px"><span class="dot" style="background:var(--accent)"></span>${t}</span>`).join("")}</div>` },
+  }[art];
+  root.innerHTML = `<div class="art" style="width:${W}px;height:${H}px;background:var(--bg2);border-radius:0">
+    <div style="position:absolute;left:40px;top:40px;right:40px"><div class="card-title">${body.title}</div><div class="card-sub">${body.sub}</div></div>
+    ${body.art}
+  </div>`;
+}
+</script>
+</body>
+</html>

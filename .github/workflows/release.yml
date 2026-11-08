@@ -101,14 +101,43 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  package-windows:
+    name: Package Windows (x64, VST3)
+    needs: prepare
+    runs-on: windows-2025-vs2026
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Fetch JUCE
+        run: git clone --depth 1 --branch 9.0.5 https://github.com/juce-framework/JUCE.git third_party/JUCE
+      - name: Configure
+        run: cmake -S . -B build -A x64
+      - name: Build plugin
+        run: cmake --build build --config Release --target Snapline_VST3 -- /m
+      - name: Package release
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          New-Item -ItemType Directory -Force dist | Out-Null
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$env:VERSION" `
+            "/DSourceDir=$PWD\build\Snapline_artefacts\Release\VST3" "/DOutputDir=$PWD\dist" build\windows\snapline.iss
+          Compress-Archive -Path build/Snapline_artefacts/Release/VST3/Snapline.vst3 -DestinationPath "dist/Snapline-$env:VERSION-windows-x64-vst3.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: Publish GitHub release
-    needs: [prepare, package]
+    needs: [prepare, package, package-windows]
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: release-macos-*
+          pattern: release-*
           merge-multiple: true
           path: dist
       - uses: softprops/action-gh-release@v3

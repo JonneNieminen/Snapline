@@ -451,26 +451,25 @@ juce::String SnaplineAudioProcessorEditor::scaleSummary() const
 
 void SnaplineAudioProcessorEditor::paintWordmark (juce::Graphics& g, juce::Point<float> origin)
 {
-    // Mark: a wavering line (the sung pitch) that settles onto a straight one.
-    const float s = 26.0f / 64.0f;
-    const auto t = juce::AffineTransform::scale (s).translated (origin.x, origin.y);
-    juce::Path wave;
-    wave.startNewSubPath (6.0f, 32.0f);
-    wave.cubicTo (10.0f, 16.0f, 16.0f, 16.0f, 19.0f, 32.0f);
-    wave.cubicTo (22.0f, 44.0f, 27.0f, 44.0f, 29.0f, 32.0f);
-    wave.cubicTo (30.5f, 26.0f, 33.0f, 26.0f, 35.0f, 32.0f);
+    // Mark ("Snap", see design/logo/make.py): a wobbling sung line that settles onto
+    // the vocal lane, between two quieter note lanes. Same geometry as the SVG masters.
+    const auto t = juce::AffineTransform::scale (30.0f / 64.0f).translated (origin.x - 2.0f, origin.y - 2.0f);
+    const juce::PathStrokeType stroke (4.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded);
+    const auto lane = [&] (const char* d, float y, juce::Colour c, float dotRadius)
+    {
+        g.setColour (c);
+        g.strokePath (juce::Drawable::parseSVGPath (d), stroke, t);
+        g.fillEllipse (juce::Rectangle<float> (dotRadius * 2.0f, dotRadius * 2.0f).withCentre ({ 49.0f, y }).transformedBy (t));
+    };
+    lane ("M35 19H49", 19.0f, colours.laneUpper.interpolatedWith (colours.sidebar, 0.5f), 3.0f);
+    lane ("M35 45H49", 45.0f, colours.laneLower.interpolatedWith (colours.sidebar, 0.5f), 3.0f);
+    lane ("M33 32H49", 32.0f, colours.vocal, 3.6f);
     g.setColour (colours.text);
-    g.strokePath (wave, juce::PathStrokeType (5.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded), t);
-    juce::Path line;
-    line.startNewSubPath (35.0f, 32.0f);
-    line.lineTo (52.0f, 32.0f);
-    g.setColour (colours.vocal);
-    g.strokePath (line, juce::PathStrokeType (5.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded), t);
-    g.fillEllipse (juce::Rectangle<float> (10.0f, 10.0f).withCentre ({ 55.0f, 32.0f }).transformedBy (t));
+    g.strokePath (juce::Drawable::parseSVGPath ("M10 32C11.5 22 16.5 22 18 32S23.5 39 25 32S28.8 29 30 32S32 32.8 33 32"), stroke, t);
 
     // Lowercase wordmark whose i-dot is the accent, as in Prism.
     const auto font = uiFont (18.0f, true);
-    const float x = origin.x + 34.0f, baselineY = origin.y + 19.0f;
+    const float x = origin.x + 36.0f, baselineY = origin.y + 19.0f;
     g.setFont (font);
     g.setColour (colours.text);
     const juce::String before = "snapl", stem = juce::String::fromUTF8 ("\xc4\xb1"), after = "ne";

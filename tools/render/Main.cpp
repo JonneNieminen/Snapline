@@ -8,7 +8,9 @@
 #include "SnaplineDsp.h"
 #include "PitchDetector.h"
 #include <juce_audio_formats/juce_audio_formats.h>
+#include <algorithm>
 #include <chrono>
+#include <functional>
 #include <cstdlib>
 #include <cmath>
 #include <cstdio>

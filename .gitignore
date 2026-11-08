@@ -1,4 +1,5 @@
-/build/
+/build/*
+!/build/windows/
 /cmake-build-*/
 /.cache/
 /third_party/JUCE/

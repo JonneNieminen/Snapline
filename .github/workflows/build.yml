@@ -66,13 +66,48 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  windows:
+    name: Windows (x64, VST3)
+    runs-on: windows-2025-vs2026
+    steps:
+      - uses: actions/checkout@v7
+      - name: Fetch JUCE
+        run: git clone --depth 1 --branch 9.0.5 https://github.com/juce-framework/JUCE.git third_party/JUCE
+      - name: Configure
+        run: cmake -S . -B build -A x64 -DSNAPLINE_BUILD_TOOLS=ON
+      - name: Build plugin
+        run: cmake --build build --config Release --target Snapline_VST3 SnaplineRender -- /m
+      - name: DSP checks
+        run: build/SnaplineRender_artefacts/Release/SnaplineRender.exe
+      - name: Build installer
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=0.0.0-ci `
+            "/DSourceDir=$PWD\build\Snapline_artefacts\Release\VST3" "/DOutputDir=$PWD\dist" build\windows\snapline.iss
+      - name: Verify plugin bundle and installer
+        shell: pwsh
+        run: |
+          if (-not (Test-Path build/Snapline_artefacts/Release/VST3/Snapline.vst3/Contents/x86_64-win/Snapline.vst3)) { throw "VST3 binary missing" }
+          if (-not (Test-Path dist/Snapline-0.0.0-ci-windows-x64-setup.exe)) { throw "Installer missing" }
+      - name: Upload plugin and installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: Snapline-windows-x64
+          path: |
+            build/Snapline_artefacts/Release/VST3/Snapline.vst3
+            dist/*.exe
+          if-no-files-found: error
+          retention-days: 14
+
   result:
     name: Build result
     if: always()
-    needs: macos
+    needs: [macos, windows]
     runs-on: ubuntu-26.04
     steps:
       - name: All builds succeeded
         env:
-          RESULT: ${{ needs.macos.result }}
-        run: test "$RESULT" = success
+          MACOS: ${{ needs.macos.result }}
+          WINDOWS: ${{ needs.windows.result }}
+        run: test "$MACOS" = success && test "$WINDOWS" = success

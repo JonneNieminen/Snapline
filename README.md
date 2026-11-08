@@ -1,22 +1,26 @@
 <div align="center">
 
-<img src="docs/logo.svg" width="120" height="120" alt="Snapline logo" />
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="docs/art/banner-light.png" />
+  <img src="docs/art/banner-dark.png" alt="Snapline — real-time pitch correction that still sounds human" width="100%" />
+</picture>
 
-# Snapline
-
-**Real-time pitch correction for vocals.**
-
-An Audio Unit and VST3 plugin for your Mac. Pull a vocal onto the notes of a key, from transparent polish to the hard-snapped effect.<br/>
-Tune by key and scale, by your own note set, or by MIDI. Everything runs locally.
+<br/><br/>
 
 [![Build](https://github.com/JonneNieminen/Snapline/actions/workflows/build.yml/badge.svg)](https://github.com/JonneNieminen/Snapline/actions/workflows/build.yml)
-[![Release](https://img.shields.io/github/v/release/JonneNieminen/Snapline?filter=v*&label=release&color=7b82e0)](https://github.com/JonneNieminen/Snapline/releases/latest)
-[![License: MIT](https://img.shields.io/github/license/JonneNieminen/Snapline?color=7b82e0)](LICENSE)
-![Platform](https://img.shields.io/badge/macOS-Apple%20Silicon%20·%20Intel-1d1d1f?logo=apple)
+[![Release](https://img.shields.io/github/v/release/JonneNieminen/Snapline?filter=v*&label=release&color=5a60c8)](https://github.com/JonneNieminen/Snapline/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/JonneNieminen/Snapline?color=5a60c8)](LICENSE)
+![Platforms](https://img.shields.io/badge/platforms-macOS%20·%20Windows-1d1d1f)
+![Formats](https://img.shields.io/badge/formats-AU%20·%20VST3-1d1d1f)
 <br/>
-[![JUCE](https://img.shields.io/badge/JUCE-9-1d1d1f)](https://juce.com)
+![Top language](https://img.shields.io/github/languages/top/JonneNieminen/Snapline?color=f34b7d)
+![Languages](https://img.shields.io/github/languages/count/JonneNieminen/Snapline)
+![Code size](https://img.shields.io/github/languages/code-size/JonneNieminen/Snapline)
+[![JUCE](https://img.shields.io/badge/JUCE-9-8DC63F)](https://juce.com)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)](https://isocpp.org)
-![Formats](https://img.shields.io/badge/Formats-AU%20·%20VST3-7b82e0)
+
+A sung line goes in wobbling and comes out on the note: natural, polished or hard-snapped,<br/>
+in real time, with formants that stay human. Tune by key and scale, your own notes or MIDI. Nothing leaves your computer.
 
 <br/>
 
@@ -26,6 +30,19 @@ Tune by key and scale, by your own note set, or by MIDI. Everything runs locally
 </picture>
 
 </div>
+
+<br/>
+
+<table>
+  <tr>
+    <td width="50%"><picture><source media="(prefers-color-scheme: light)" srcset="docs/art/card-tune-light.png" /><img src="docs/art/card-tune-dark.png" alt="Tune in real time: by key, scale, your own notes or MIDI" /></picture></td>
+    <td width="50%"><picture><source media="(prefers-color-scheme: light)" srcset="docs/art/card-human-light.png" /><img src="docs/art/card-human-dark.png" alt="Still sounds human: formant-preserving, with Humanize and Tolerance" /></picture></td>
+  </tr>
+  <tr>
+    <td width="50%"><picture><source media="(prefers-color-scheme: light)" srcset="docs/art/card-realtime-light.png" /><img src="docs/art/card-realtime-dark.png" alt="Light enough to leave on: Live and Studio modes" /></picture></td>
+    <td width="50%"><picture><source media="(prefers-color-scheme: light)" srcset="docs/art/card-private-light.png" /><img src="docs/art/card-private-dark.png" alt="Private by design: runs locally inside your DAW" /></picture></td>
+  </tr>
+</table>
 
 ## Features
 
@@ -41,15 +58,20 @@ Tune by key and scale, by your own note set, or by MIDI. Everything runs locally
 
 ## Install
 
-1. Download the latest **`Snapline-x.y.z-plugins-macos-arm64.zip`** (Apple Silicon) or **`-x86_64.zip`** (Intel) from [Releases](https://github.com/JonneNieminen/Snapline/releases/latest).
-2. Copy `Snapline.component` to `~/Library/Audio/Plug-Ins/Components` and `Snapline.vst3` to `~/Library/Audio/Plug-Ins/VST3`.
-3. The plugins aren't notarized yet, so remove the quarantine flag once:
+Download the file for your computer from [Releases](https://github.com/JonneNieminen/Snapline/releases/latest):
 
-```bash
-xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/Snapline.component ~/Library/Audio/Plug-Ins/VST3/Snapline.vst3
-```
+| Platform | File | Formats |
+|---|---|---|
+| **macOS** (Apple silicon / Intel) | `Snapline-x.y.z-plugins-macos-arm64.zip` / `-macos-x86_64.zip` | Audio Unit, VST3 |
+| **Windows** (x64) | `Snapline-x.y.z-windows-x64-setup.exe` (or the `-vst3.zip`) | VST3 |
 
-4. Rescan plugins in your DAW. In Logic Pro, Snapline is under **Audio Units → Snapline Audio**.
+- **macOS**: copy `Snapline.component` to `~/Library/Audio/Plug-Ins/Components` and `Snapline.vst3` to `~/Library/Audio/Plug-Ins/VST3`. The plugins aren't notarized yet, so remove the quarantine flag once:
+  ```bash
+  xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/Snapline.component ~/Library/Audio/Plug-Ins/VST3/Snapline.vst3
+  ```
+- **Windows**: run the installer; it puts `Snapline.vst3` in `C:\Program Files\Common Files\VST3`. SmartScreen may warn, so choose *More info → Run anyway*.
+
+Then rescan plugins in your DAW. In Logic Pro, Snapline is under **Audio Units → Snapline Audio**.
 
 ## Using Snapline
 
@@ -102,7 +124,11 @@ Developer tools build with `-DSNAPLINE_BUILD_TOOLS=ON`:
 - `SnaplineRender [wav-dir]` renders a synthetic off-key vocal at 44.1, 48 and 96 kHz. It checks pitch accuracy, transparency, latency, formants, transpose, MIDI forcing, block sizes, silence and CPU cost, and optionally writes WAV files.
 - `SnaplineSnapshot [dir]` renders the interface in both themes to PNG (the screenshots above).
 
-CI ([`build.yml`](.github/workflows/build.yml)) builds both formats for Apple Silicon and Intel, runs the DSP checks and validates the Audio Unit with `auval`. [`release.yml`](.github/workflows/release.yml) publishes the plugin zips.
+On Windows (Visual Studio 2022 or newer and CMake), configure with `cmake -S . -B build -A x64` and build `Snapline_VST3` in `Release`; `build/windows/snapline.iss` packages it with [Inno Setup](https://jrsoftware.org/isinfo.php).
+
+CI ([`build.yml`](.github/workflows/build.yml)) builds AU and VST3 for Apple Silicon and Intel and the VST3 for Windows x64, runs the DSP checks on every platform and validates the Audio Unit with `auval`. [`release.yml`](.github/workflows/release.yml) publishes the macOS plugin zips and the Windows installer.
+
+The logo masters come from `design/logo/make.py`, the README art from `design/banners/render.sh` (headless Chrome) and the theme from `design/theme/tokens.css` (mirrored in `Source/DesignTokens.h`).
 
 ## Architecture
 
