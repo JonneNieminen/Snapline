@@ -74,7 +74,8 @@ jobs:
           auval -strict -v aumf SNL1 SNPL
       - name: pluginval (strictness 10, AU and VST3)
         run: |
-          curl -fsSL -o pluginval.zip "https://github.com/Tracktion/pluginval/releases/download/${PLUGINVAL_VERSION}/pluginval_macOS.zip"
+          curl -fsSL --retry 6 --retry-all-errors --retry-delay 10 --connect-timeout 30 -o pluginval.zip \
+            "https://github.com/Tracktion/pluginval/releases/download/${PLUGINVAL_VERSION}/pluginval_macOS.zip"
           ditto -x -k pluginval.zip pluginval-bin
           for bundle in AU/Snapline.component VST3/Snapline.vst3; do
             pluginval-bin/pluginval.app/Contents/MacOS/pluginval --strictness-level 10 --validate-in-process \
@@ -106,7 +107,19 @@ jobs:
       - name: pluginval (strictness 10, VST3)
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://github.com/Tracktion/pluginval/releases/download/$env:PLUGINVAL_VERSION/pluginval_Windows.zip" -OutFile pluginval.zip
+          # GitHub's download endpoint sometimes answers with a 5xx page; retry with a growing pause.
+          $url = "https://github.com/Tracktion/pluginval/releases/download/$env:PLUGINVAL_VERSION/pluginval_Windows.zip"
+          for ($attempt = 1; $attempt -le 6; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile pluginval.zip -TimeoutSec 120
+              if ((Get-Item pluginval.zip).Length -gt 100000) { break }
+              throw "downloaded file is too small"
+            } catch {
+              if ($attempt -eq 6) { throw "pluginval download failed after $attempt attempts" }
+              Write-Host "Download attempt $attempt failed, retrying in $($attempt * 10) s"
+              Start-Sleep -Seconds ($attempt * 10)
+            }
+          }
           Expand-Archive pluginval.zip -DestinationPath pluginval-bin
           & .\pluginval-bin\pluginval.exe --strictness-level 10 --validate-in-process "build\Snapline_artefacts\Release\VST3\Snapline.vst3"
           if ($LASTEXITCODE -ne 0) { throw "pluginval failed with exit code $LASTEXITCODE" }
