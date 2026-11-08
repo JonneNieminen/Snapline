@@ -150,7 +150,7 @@ New parameters get new IDs (version 1 in `juce::ParameterID`). Never rename or r
 | Studio latency | reported = measured ± 2 samples | exact |
 | Live delay | 8–30 ms | 8–20 ms |
 | Level change | < 1.5 dB | < 0.1 dB |
-| CPU (one core, 48 kHz) | > 10× real time; goal ≤ 1 % | ≈ 87× (≈ 1.15 %) |
+| CPU (one core, 48 kHz) | > 10× real time; goal ≤ 1 % | melody with pauses ≈ 167× (**0.60 %**); continuous voice, no pauses ≈ 141× (**0.71 %**) |
 
 Human-by-default checks (Studio and Live, 44.1 / 48 / 96 kHz; synthetic 40 ct vibrato at 5.6 Hz, scoop 100 ct flat rising in 120 ms, noise bursts abutting notes, breathy low voice at noise 0.6):
 
@@ -166,6 +166,16 @@ Human-by-default checks (Studio and Live, 44.1 / 48 / 96 kHz; synthetic 40 ct vi
 
 The tracked vibrato is above 100 % because the two-pole centre leaks about a quarter of a 5.6 Hz vibrato with a phase lag. Live delay is now 8–22 ms (about 2 ms more: the mark refinement looks further ahead). CPU was unchanged (≈ 88× real time at 48 kHz).
 
+CPU, measured by `SnaplineRender` (wall time of the engine alone, Release, one Apple-silicon core, 256-sample blocks, mean of the first run; the continuous-voice figure is the best of three runs). Not an Instruments profile; the plugin wrapper adds a negligible amount per block:
+
+| 48 kHz | Before step 2 | After step 2 |
+|---|---|---|
+| Melody with pauses (Studio / Live) | 1.14 % / 1.14 % | 0.60 % / 0.59 % |
+| Continuous voice (no pauses) | 1.34 % | 0.71 % |
+| 44.1 kHz / 96 kHz (melody) | 1.2 % / 2.4 % | 0.6 % / 1.2 % |
+
+Where it went: YIN used one 4096-point FFT size for every input type (now the smallest power of two that fits 2·W: 2048 for Alto/Tenor, 1024 for Soprano); quiet frames skip the FFT; grain windows come from a 1024-entry table (symmetric, so overlapping grains still sum to one) instead of a `cos` per sample; grains at an unchanged formant factor use constant 4-tap Hermite weights (or plain copies when the read position is integral); grains cut from digitally silent input are skipped; with Mix at 0 the resynthesis is skipped (tracking continues for the display). Accuracy, null and latency numbers did not change.
+
 Also run: `auval -strict -v aumf SNL1 SNPL`, `SnaplineSnapshot docs/screenshots` after UI changes, and a listen to the WAVs `SnaplineRender renders` writes.
 
 ## 9. Status and next work
@@ -175,7 +185,7 @@ Also run: `auval -strict -v aumf SNL1 SNPL`, `SnaplineSnapshot docs/screenshots`
 **Next (in priority order):**
 
 1. ~~**More human by default**~~ (done: natural vibrato with a `naturalVibrato` parameter, onset ramp, cross-correlation mark refinement, voiced/unvoiced edge fade, and render checks for each; see section 8. Factory presets set `naturalVibrato` to 0 except Hard Tune and Robot (−100). Sessions saved before this change load with the new parameter at 0, so vibrato now passes through at their retune speeds.)
-2. **Efficiency**: window lookup tables instead of per-sample `cos`; skip Hermite when the read position is integral; early-out on digital silence and on `mix = 0`; keep the YIN FFT size minimal per input type. Profile one instance with Instruments and record the figure in this file. Goal ≤ 1 % of a core at 48 kHz on Apple silicon.
+2. ~~**Efficiency**~~ (done: window table, constant-weight or integral reads, silence and `mix = 0` early-outs, minimal YIN FFT per input type; 0.60 % / 0.71 % of one core at 48 kHz, see section 8. An Instruments profile of a host session is still worth doing.)
 3. **Completeness**: a soft *Bypass* parameter (latency-compensated crossfade, `getBypassParameter`); user presets saved as XML in the user's application-data folder, loaded and saved on the message thread; resizable editor (75–150 % scale); keyboard and accessibility titles for every control.
 4. **Validation**: add [pluginval](https://github.com/Tracktion/pluginval) (strictness 10) for AU and VST3 on macOS and VST3 on Windows in `build.yml`; confirm the Windows jobs and installer on GitHub.
 

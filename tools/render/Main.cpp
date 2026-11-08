@@ -613,7 +613,7 @@ int main (int argc, char** argv)
             check (std::abs (levelDiff) < 1.5, juce::String (juce::String ("level matches input (") + name + ")").toRawUTF8(),
                    juce::String::formatted ("%+.2f dB", levelDiff));
             check (r.seconds < melodyEnd * 0.1, juce::String (juce::String ("CPU cost (") + name + ")").toRawUTF8(),
-                   juce::String::formatted ("%.1fx real time", (melodyEnd + 0.4) / r.seconds));
+                   juce::String::formatted ("%.1fx real time (%.2f %% of one core)", (melodyEnd + 0.4) / r.seconds, 100.0 * r.seconds / (melodyEnd + 0.4)));
             if (fs == 48000.0) writeWav (outDir, juce::String ("hardtune-") + name + "-" + tag, r.left, fs);
 
             // Natural settings keep the singer's vibrato but still pull notes in.
@@ -728,6 +728,35 @@ int main (int argc, char** argv)
             std::vector<float> silence ((size_t) fs, 0.0f);
             const auto r = run (silence, fs, 128, SnaplineParams {});
             check (finite (r) && peakOf (r) < 1.0e-6, "silence stays silent", juce::String::formatted ("peak %.1f dBFS", toDb (peakOf (r))));
+        }
+
+        // Mix at 0 % skips the resynthesis and must give back the dry signal, delayed.
+        {
+            SnaplineParams dry;
+            dry.mode = Mode::studio;
+            dry.allowed = cMajor;
+            dry.mix = 0.0f;
+            const auto r = run (vocal, fs, 256, dry);
+            SnaplineDsp lagProbe;
+            lagProbe.prepare (fs, 256, Mode::studio);
+            const double depth = nullDepth (vocal, r.left, lagProbe.getLatencySamples (Mode::studio));
+            check (depth > 100.0, "mix 0 % is the delayed dry signal", juce::String::formatted ("null %.0f dB, %.2f %% of one core", depth,
+                   100.0 * r.seconds / (melodyEnd + 0.4)));
+        }
+
+        // Worst case for the CPU: a voice that never pauses (nothing to skip), best of three runs.
+        {
+            const std::vector<Note> sung { { 0.0, 1.6, 57.35, 30.0 }, { 1.6, 1.6, 59.72, 30.0 }, { 3.2, 1.6, 62.15, 30.0 }, { 4.8, 1.6, 60.4, 30.0 } };
+            const auto continuous = makeVocal (fs, sung, 6.4);
+            SnaplineParams busy;
+            busy.allowed = cMajor;
+            busy.retuneMs = 40.0f;
+            busy.humanize = 30.0f;
+            double best = 1.0e9;
+            for (int pass = 0; pass < 3; ++pass)
+                best = std::min (best, run (continuous, fs, 256, busy).seconds);
+            check (best < 6.4 * 0.1, "CPU, continuous voice (worst case)",
+                   juce::String::formatted ("%.1fx real time (%.2f %% of one core)", 6.4 / best, 100.0 * best / 6.4));
         }
 
         // Human-by-default behaviour (vibrato, scoops, consonant edges, roughness).

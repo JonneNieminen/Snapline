@@ -10,7 +10,6 @@ namespace snapline
 namespace
 {
 constexpr double twoPi = 6.283185307179586476925;
-constexpr double pi = 3.141592653589793238463;
 
 struct VoiceRange { float minHz, maxHz; };
 constexpr std::array<VoiceRange, 4> voiceRanges {{
@@ -36,6 +35,23 @@ constexpr float maxDeviation = 60.0f;     // cents the pitch may stray from its 
 constexpr int markCapacity = 8192;
 constexpr int frameCapacity = 4096;
 constexpr int displayCapacity = 4096;
+
+constexpr int hannTableSize = 1024;
+constexpr int silenceBlockShift = 5;       // 32-sample blocks flagged as digitally silent
+constexpr float silenceLevel = 1.0e-7f;
+
+/** 0.5 + 0.5 cos (pi x) sampled at x = k / hannTableSize (plus a guard entry). Symmetric, so
+    table (x) + table (1 - x) = 1 and overlapping grains still sum to one. */
+const std::array<float, hannTableSize + 2>& hannTable()
+{
+    static const auto table = [] {
+        std::array<float, hannTableSize + 2> t {};
+        for (int k = 0; k < hannTableSize + 2; ++k)
+            t[(size_t) k] = (float) (0.5 + 0.5 * std::cos (3.141592653589793238463 * k / hannTableSize));
+        return t;
+    }();
+    return table;
+}
 
 int nextPow2 (int v)
 {
@@ -83,6 +99,9 @@ struct SnaplineDsp::Impl
     int ringSize = 0, ringMask = 0;
 
     std::vector<float> input, lowpassed, dryL, dryR, acc, win, scratch;
+    std::vector<std::uint8_t> blockLoud;   // per 32-sample block of `input`: any sample above -140 dB
+    float blockPeak = 0.0f;
+    int hopCounter = 0;
     PitchDetector detector;
 
     std::int64_t now = 0;                 // samples received
@@ -136,6 +155,7 @@ struct SnaplineDsp::Impl
         for (auto* v : { &input, &lowpassed, &dryL, &dryR, &acc, &win })
             v->assign ((size_t) ringSize, 0.0f);
         scratch.assign ((size_t) (2 * maxWindow + 4), 0.0f);
+        blockLoud.assign ((size_t) (ringSize >> silenceBlockShift), (std::uint8_t) 0);
         detector.prepare (fs, maxWindow);
         marks.assign ((size_t) markCapacity, {});
         frames.assign ((size_t) frameCapacity, {});
@@ -149,6 +169,9 @@ struct SnaplineDsp::Impl
         for (auto* v : { &input, &lowpassed, &dryL, &dryR, &acc, &win })
             std::fill (v->begin(), v->end(), 0.0f);
         now = 0;
+        hopCounter = 0;
+        blockPeak = 0.0f;
+        std::fill (blockLoud.begin(), blockLoud.end(), (std::uint8_t) 0);
         markCount = 0;
         pushMark (0, false);
         frameCount = 0;
@@ -219,20 +242,22 @@ struct SnaplineDsp::Impl
         Frame f;
         f.time = now - window;
 
+        // Frames that cannot pass the level gates below skip the FFT inside detect().
+        const float decay = std::exp (-(float) hop / (float) (0.6 * fs));
         PitchDetector::Result res;
         if (now >= 2 * window)
         {
             const std::int64_t start = now - 2 * window;
             for (int i = 0; i < 2 * window; ++i)
                 scratch[(size_t) i] = input[(size_t) ((start + i) & ringMask)];
-            res = detector.detect (scratch.data(), window, minLag, yinThreshold);
+            res = detector.detect (scratch.data(), window, minLag, yinThreshold,
+                                   juce::jmax (gateRms, levelEnvelope * decay * relativeGate));
         }
 
         const bool inRange = res.hz >= r.minHz * 0.9f && res.hz <= r.maxHz * 1.1f;
         const float limit = trackerVoiced ? voicedHoldAperiodicity : voicedOnAperiodicity;
         // Level relative to the recent vocal: quiet note tails and room noise are
         // not tracked (they invite octave errors), the hold below bridges the edge.
-        const float decay = std::exp (-(float) hop / (float) (0.6 * fs));
         levelEnvelope = juce::jmax (res.rms, levelEnvelope * decay);
         const bool loudEnough = res.rms > gateRms && res.rms > levelEnvelope * relativeGate;
         bool voiced = inRange && loudEnough && res.aperiodicity < limit;
@@ -661,6 +686,16 @@ struct SnaplineDsp::Impl
         return j + 1 < markCount && (double) g.centre + g.sourceReach + 3.0 < (double) now;
     }
 
+    /** True when every input sample in [lo, hi] is known to be digitally silent. */
+    bool sourceSilent (std::int64_t lo, std::int64_t hi) const
+    {
+        const auto completeBlocks = now >> silenceBlockShift;
+        for (auto blk = juce::jmax<std::int64_t> (0, lo) >> silenceBlockShift; blk <= (hi >> silenceBlockShift); ++blk)
+            if (blk >= completeBlocks || blockLoud[(size_t) (blk & (std::int64_t) (blockLoud.size() - 1))] != 0)
+                return false;
+        return true;
+    }
+
     void addGrain (double centre, const Grain& g, std::int64_t outputStart)
     {
         // Output half-lengths: grains are stretched (never shortened) so overlap stays >= 50 %.
@@ -668,15 +703,52 @@ struct SnaplineDsp::Impl
         const double outLeft = g.left * stretch, outRight = g.right * stretch;
         const auto first = juce::jmax (outputStart, (std::int64_t) std::ceil (centre - outLeft));
         const auto last = (std::int64_t) std::floor (centre + outRight);
+        if (first > last)
+            return;
+
+        // A grain cut from silence adds nothing (its sum is zero and its weight only matters
+        // where the sum is not), so skip the whole loop.
+        const double readLo = (double) g.centre + ((double) first - centre) * g.formant;
+        const double readHi = (double) g.centre + ((double) last - centre) * g.formant;
+        if (sourceSilent ((std::int64_t) std::floor (juce::jmin (readLo, readHi)) - 2, (std::int64_t) std::ceil (juce::jmax (readLo, readHi)) + 3))
+            return;
+
+        const auto& table = hannTable();
+        const bool fixedPhase = g.formant == 1.0; // the read offset is the same for every sample
+        float h0 = 0, h1 = 0, h2 = 0, h3 = 0;
+        std::int64_t base0 = 0;
+        bool direct = false;
+        if (fixedPhase)
+        {
+            const double position = (double) g.centre + ((double) first - centre);
+            base0 = (std::int64_t) std::floor (position);
+            const float t = (float) (position - (double) base0);
+            direct = t < 1.0e-6f; // integral reads need no interpolation
+            h0 = t * (-0.5f + t * (1.0f - 0.5f * t));
+            h1 = 1.0f + t * t * (-2.5f + 1.5f * t);
+            h2 = t * (0.5f + t * (2.0f - 1.5f * t));
+            h3 = t * t * (-0.5f + 0.5f * t);
+        }
+
         for (auto i = first; i <= last; ++i)
         {
             const double d = (double) i - centre;
             const double half = d < 0.0 ? outLeft : outRight;
-            const float w = (float) (0.5 + 0.5 * std::cos (pi * d / half));
+            const float x = (float) (std::abs (d) / half * hannTableSize);
+            const int k = juce::jmin (hannTableSize, (int) x);
+            const float w = table[(size_t) k] + (table[(size_t) k + 1] - table[(size_t) k]) * (x - (float) k);
             if (w <= 0.0f)
                 continue;
-            const float x = interpolatedAt ((double) g.centre + d * g.formant);
-            acc[(size_t) (i & ringMask)] += w * x;
+            float sample;
+            if (fixedPhase)
+            {
+                const auto p = base0 + (i - first);
+                sample = direct ? sampleAt (p)
+                                : h0 * sampleAt (p - 1) + h1 * sampleAt (p) + h2 * sampleAt (p + 1) + h3 * sampleAt (p + 2);
+            }
+            else
+                sample = interpolatedAt ((double) g.centre + d * g.formant);
+            acc[(size_t) (i & ringMask)] += w * sample;
             win[(size_t) (i & ringMask)] += w;
         }
     }
@@ -747,12 +819,24 @@ struct SnaplineDsp::Impl
             lowpassed[idx] = lp2;
             dryL[idx] = l;
             dryR[idx] = r;
+            blockPeak = std::max (blockPeak, std::abs (mono));
+            if ((now & ((1 << silenceBlockShift) - 1)) == (1 << silenceBlockShift) - 1)
+            {
+                blockLoud[(size_t) ((now >> silenceBlockShift) & (std::int64_t) (blockLoud.size() - 1))] = blockPeak > silenceLevel ? 1 : 0;
+                blockPeak = 0.0f;
+            }
             ++now;
-            if (now % hop == 0)
+            if (++hopCounter == hop)
+            {
+                hopCounter = 0;
                 analyseFrame();
+            }
         }
         placeMarks();
-        scheduleGrains (blockStart, now);
+        // Mix at zero (and settled): the wet signal is not heard, so skip the resynthesis.
+        // Tracking continues for the display; grains resume from the next block.
+        if (p.mix > 0.0f || mixSmoothed > 1.0e-4f)
+            scheduleGrains (blockStart, now);
         effectiveDelay.store ((float) (latency + extraDelay), std::memory_order_relaxed);
 
         const float mixTarget = juce::jlimit (0.0f, 1.0f, p.mix * 0.01f);

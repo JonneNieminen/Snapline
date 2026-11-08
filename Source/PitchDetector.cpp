@@ -6,38 +6,46 @@ namespace snapline
 void PitchDetector::prepare (double sampleRate, int maxWindow)
 {
     fs = sampleRate;
-    int order = 1;
-    while ((1 << order) < 2 * maxWindow)
-        ++order;
-    fftSize = 1 << order;
-    fft = std::make_unique<juce::dsp::FFT> (order);
-    a.assign ((size_t) fftSize * 2, 0.0f);
-    b.assign ((size_t) fftSize * 2, 0.0f);
+    maxOrder = 1;
+    while ((1 << maxOrder) < 2 * maxWindow)
+        ++maxOrder;
+    ffts.clear();
+    ffts.resize ((size_t) maxOrder + 1);
+    for (int order = 5; order <= maxOrder; ++order)
+        ffts[(size_t) order] = std::make_unique<juce::dsp::FFT> (order);
+    a.assign ((size_t) (2 << maxOrder), 0.0f);
+    b.assign ((size_t) (2 << maxOrder), 0.0f);
     prefix.assign ((size_t) (2 * maxWindow + 1), 0.0);
     diff.assign ((size_t) (maxWindow + 2), 0.0f);
 }
 
-PitchDetector::Result PitchDetector::detect (const float* frame, int window, int minLag, float threshold)
+PitchDetector::Result PitchDetector::detect (const float* frame, int window, int minLag, float threshold, float minRms)
 {
     Result result;
     const int W = window;
     const int n = 2 * W;
-    if (fft == nullptr || n > fftSize || minLag < 2 || minLag >= W - 1)
+    int order = 5;
+    while ((1 << order) < n)
+        ++order;
+    if (order > maxOrder || ffts.empty() || minLag < 2 || minLag >= W - 1)
         return result;
+    const int fftSize = 1 << order;
+    auto& fft = ffts[(size_t) order];
 
     prefix[0] = 0.0;
     for (int i = 0; i < n; ++i)
         prefix[(size_t) i + 1] = prefix[(size_t) i] + (double) frame[i] * (double) frame[i];
     result.rms = (float) std::sqrt (prefix[(size_t) n] / (double) n);
     const double energy0 = prefix[(size_t) W];
-    if (energy0 < 1.0e-10)
+    if (energy0 < 1.0e-10 || result.rms < minRms)
         return result;
 
-    // r(tau) = sum_{j<W} x[j] x[j + tau], via IFFT(conj(A) * B).
-    std::fill (a.begin(), a.end(), 0.0f);
-    std::fill (b.begin(), b.end(), 0.0f);
+    // r(tau) = sum_{j<W} x[j] x[j + tau], via IFFT(conj(A) * B). Only the transform's
+    // input half needs zero padding.
     std::copy (frame, frame + W, a.begin());
+    std::fill (a.begin() + W, a.begin() + fftSize, 0.0f);
     std::copy (frame, frame + n, b.begin());
+    std::fill (b.begin() + n, b.begin() + fftSize, 0.0f);
     fft->performRealOnlyForwardTransform (a.data());
     fft->performRealOnlyForwardTransform (b.data());
     for (int k = 0; k < fftSize; ++k)

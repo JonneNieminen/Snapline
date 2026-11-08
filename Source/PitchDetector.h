@@ -27,14 +27,16 @@ public:
 
     /**
         frame must hold 2 * window contiguous samples (oldest first). Lags from
-        minLag to window are searched.
+        minLag to window are searched. A frame quieter than minRms returns (with its rms set)
+        before any FFT is computed. The FFT is the smallest power of two that fits 2 * window,
+        so each input type pays only for its own range.
     */
-    Result detect (const float* frame, int window, int minLag, float threshold);
+    Result detect (const float* frame, int window, int minLag, float threshold, float minRms = 0.0f);
 
 private:
     double fs = 48000.0;
-    int fftSize = 0;
-    std::unique_ptr<juce::dsp::FFT> fft;
+    int maxOrder = 0;
+    std::vector<std::unique_ptr<juce::dsp::FFT>> ffts; // indexed by order; only those in use are created
     std::vector<float> a, b;
     std::vector<double> prefix;
     std::vector<float> diff;
