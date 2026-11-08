@@ -51,6 +51,15 @@ jobs:
           for b in VST3/Snapline.vst3 AU/Snapline.component; do
             codesign --force --deep --sign - "build/Snapline_artefacts/Release/$b"
           done
+      - name: Installer smoke test
+        run: |
+          mkdir -p dist/plugins
+          cp -R build/Snapline_artefacts/Release/VST3/Snapline.vst3 build/Snapline_artefacts/Release/AU/Snapline.component dist/plugins/
+          build/macos/make-pkg.sh dist/plugins 0.0.0-ci dist/Snapline-ci.pkg
+          pkgutil --expand-full dist/Snapline-ci.pkg dist/expanded
+          test -d dist/expanded/au.pkg/Payload/Library/Audio/Plug-Ins/Components/Snapline.component
+          test -d dist/expanded/vst3.pkg/Payload/Library/Audio/Plug-Ins/VST3/Snapline.vst3
+          rm -rf dist
       - name: Verify plugin bundles
         run: |
           test -d build/Snapline_artefacts/Release/VST3/Snapline.vst3

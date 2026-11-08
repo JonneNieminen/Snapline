@@ -1,5 +1,6 @@
 /build/*
 !/build/windows/
+!/build/macos/
 /cmake-build-*/
 /.cache/
 /third_party/JUCE/

@@ -101,6 +101,70 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  package-macos-installer:
+    name: Package macOS installer (universal)
+    needs: prepare
+    runs-on: macos-26
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      # Optional Developer ID signing and notarization: set these repository secrets to switch it on.
+      # MACOS_CERTS_P12 (base64 .p12 with a "Developer ID Application" and a "Developer ID Installer" certificate),
+      # MACOS_CERTS_PASSWORD, MACOS_NOTARY_APPLE_ID, MACOS_NOTARY_PASSWORD (app-specific), MACOS_NOTARY_TEAM_ID.
+      HAVE_SIGNING: ${{ secrets.MACOS_CERTS_P12 != '' && secrets.MACOS_NOTARY_APPLE_ID != '' }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Fetch JUCE
+        run: git clone --depth 1 --branch 9.0.5 https://github.com/juce-framework/JUCE.git third_party/JUCE
+      - name: Configure (arm64 + x86_64)
+        run: >-
+          cmake -S . -B build -G "Unix Makefiles"
+          -DCMAKE_BUILD_TYPE=Release
+          "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+      - name: Build plugins
+        run: cmake --build build --config Release --target Snapline_VST3 Snapline_AU -j 4
+      - name: Import signing certificates
+        if: env.HAVE_SIGNING == 'true'
+        env:
+          CERTS_P12: ${{ secrets.MACOS_CERTS_P12 }}
+          CERTS_PASSWORD: ${{ secrets.MACOS_CERTS_PASSWORD }}
+          NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+          NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          security create-keychain -p ci "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p ci "$keychain"
+          echo "$CERTS_P12" | base64 --decode > "$RUNNER_TEMP/certs.p12"
+          security import "$RUNNER_TEMP/certs.p12" -k "$keychain" -P "$CERTS_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productsign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k ci "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          xcrun notarytool store-credentials snapline-notary --apple-id "$NOTARY_APPLE_ID" --team-id "$NOTARY_TEAM_ID" --password "$NOTARY_PASSWORD"
+          echo "APP_IDENTITY=$(security find-identity -v -p codesigning "$keychain" | grep 'Developer ID Application' | head -n1 | sed -E 's/.*"(.*)".*/\1/')" >> "$GITHUB_ENV"
+          echo "PKG_SIGN_IDENTITY=$(security find-identity -v "$keychain" | grep 'Developer ID Installer' | head -n1 | sed -E 's/.*"(.*)".*/\1/')" >> "$GITHUB_ENV"
+          echo "NOTARY_PROFILE=snapline-notary" >> "$GITHUB_ENV"
+      - name: Sign bundles
+        run: |
+          identity="${APP_IDENTITY:--}"
+          flags=(--force --deep --sign "$identity")
+          [[ "$identity" != "-" ]] && flags+=(--options runtime --timestamp)
+          for b in VST3/Snapline.vst3 AU/Snapline.component; do
+            codesign "${flags[@]}" "build/Snapline_artefacts/Release/$b"
+          done
+      - name: Build installer
+        run: |
+          mkdir -p dist/plugins
+          cp -R build/Snapline_artefacts/Release/VST3/Snapline.vst3 build/Snapline_artefacts/Release/AU/Snapline.component dist/plugins/
+          build/macos/make-pkg.sh dist/plugins "$VERSION" "dist/Snapline-${VERSION}-macos.pkg"
+          rm -rf dist/plugins
+          pkgutil --check-signature "dist/Snapline-${VERSION}-macos.pkg" || true
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-macos-installer
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
   package-windows:
     name: Package Windows (x64, VST3)
     needs: prepare
@@ -132,7 +196,7 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    needs: [prepare, package, package-windows]
+    needs: [prepare, package, package-macos-installer, package-windows]
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/download-artifact@v8

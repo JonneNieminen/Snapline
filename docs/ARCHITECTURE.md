@@ -25,7 +25,7 @@ Non-goals: polyphonic correction, graphical note editing (Melodyne-style), cloud
 | Windows | VST3 x64, Inno Setup installer (`build/windows/snapline.iss`) |
 | Codes | Manufacturer `SNPL`, plugin `SNL1`, bundle ID `audio.snapline.pitchcorrection` |
 | Buses | Mono→mono or stereo→stereo (`isBusesLayoutSupported`) |
-| CI | `.github/workflows/build.yml`: macOS arm64/x86_64 (AU+VST3, DSP and plugin checks, `auval -strict`, pluginval strictness 10 on AU and VST3), Windows x64 (VST3, DSP checks, pluginval strictness 10, installer). `release.yml`: manual SemVer release with macOS plugin zips, the Windows installer and a Windows VST3 zip. Same shape and runners as Axiom/Prism. |
+| CI | `.github/workflows/build.yml`: macOS arm64/x86_64 (AU+VST3, DSP and plugin checks, `auval -strict`, pluginval strictness 10 on AU and VST3), Windows x64 (VST3, DSP checks, pluginval strictness 10, installer). `release.yml`: manual SemVer release with the macOS installer (`Snapline-x.y.z-macos.pkg`, universal), macOS plugin zips, the Windows installer and a Windows VST3 zip. Same shape and runners as Axiom/Prism. |
 
 ## 3. Module map
 
@@ -44,6 +44,7 @@ tools/render             SnaplineRender: offline DSP quality, latency and CPU ch
 tools/snapshot           SnaplineSnapshot: renders the editor (both themes) to PNG; `--check` runs plugin-level tests (presets, state, resizing, titles).
 design/                  logo (make.py), banners (art.html + render.sh), theme (tokens.css).
 build/windows            Inno Setup script.
+build/macos              Installer: `make-pkg.sh` (pkgbuild + productbuild; AU to /Library/Audio/Plug-Ins/Components, VST3 to /Library/Audio/Plug-Ins/VST3), welcome/finish screens, `uninstall.sh`. Optional Developer ID signing and notarization through `PKG_SIGN_IDENTITY` / `NOTARY_PROFILE`.
 ```
 
 Dependency rule: `SnaplineDsp` and `PitchDetector` depend only on `juce_core`/`juce_dsp`, so tools and tests link them without the plugin. The UI never touches the engine directly; it reads the processor.

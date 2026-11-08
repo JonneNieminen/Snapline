@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>Snapline</title>
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <conclusion file="conclusion.html" mime-type="text/html"/>
+    <options customize="never" require-scripts="false"/>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="au"/>
+            <line choice="vst3"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="au" visible="false" title="Audio Unit" description="Snapline for Logic Pro, GarageBand and MainStage.">
+        <pkg-ref id="audio.snapline.pitchcorrection.au"/>
+    </choice>
+    <choice id="vst3" visible="false" title="VST3" description="Snapline for Ableton Live, Reaper, Cubase, Bitwig, Studio One and other VST3 hosts.">
+        <pkg-ref id="audio.snapline.pitchcorrection.vst3"/>
+    </choice>
+    <pkg-ref id="audio.snapline.pitchcorrection.au" version="@VERSION@" onConclusion="none">au.pkg</pkg-ref>
+    <pkg-ref id="audio.snapline.pitchcorrection.vst3" version="@VERSION@" onConclusion="none">vst3.pkg</pkg-ref>
+</installer-gui-script>

@@ -62,10 +62,11 @@ Download the file for your computer from [Releases](https://github.com/JonneNiem
 
 | Platform | File | Formats |
 |---|---|---|
-| **macOS** (Apple silicon / Intel) | `Snapline-x.y.z-plugins-macos-arm64.zip` / `-macos-x86_64.zip` | Audio Unit, VST3 |
+| **macOS** (Apple silicon and Intel) | `Snapline-x.y.z-macos.pkg` (installer), or the `-plugins-macos-arm64.zip` / `-x86_64.zip` | Audio Unit, VST3 |
 | **Windows** (x64) | `Snapline-x.y.z-windows-x64-setup.exe` (or the `-vst3.zip`) | VST3 |
 
-- **macOS**: copy `Snapline.component` to `~/Library/Audio/Plug-Ins/Components` and `Snapline.vst3` to `~/Library/Audio/Plug-Ins/VST3`. The plugins aren't notarized yet, so remove the quarantine flag once:
+- **macOS, the easy way**: open `Snapline-x.y.z-macos.pkg`, click **Continue**, then **Install**, and type your Mac's password. It installs the Audio Unit and the VST3 for every user on the Mac, on Apple silicon and Intel. If macOS says it "cannot check it for malicious software" (the installer isn't notarized yet, see below), open **System Settings → Privacy & Security**, scroll down and click **Open Anyway** next to Snapline, then open the installer again. To remove Snapline, delete `Snapline.component` from `/Library/Audio/Plug-Ins/Components` and `Snapline.vst3` from `/Library/Audio/Plug-Ins/VST3`, or run [`build/macos/uninstall.sh`](build/macos/uninstall.sh).
+- **macOS, by hand** (the zip): copy `Snapline.component` to `~/Library/Audio/Plug-Ins/Components` and `Snapline.vst3` to `~/Library/Audio/Plug-Ins/VST3`. The plugins aren't notarized yet, so remove the quarantine flag once:
   ```bash
   xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/Snapline.component ~/Library/Audio/Plug-Ins/VST3/Snapline.vst3
   ```
@@ -131,7 +132,7 @@ Developer tools build with `-DSNAPLINE_BUILD_TOOLS=ON`:
 
 On Windows (Visual Studio 2022 or newer and CMake), configure with `cmake -S . -B build -A x64` and build `Snapline_VST3` in `Release`; `build/windows/snapline.iss` packages it with [Inno Setup](https://jrsoftware.org/isinfo.php).
 
-CI ([`build.yml`](.github/workflows/build.yml)) builds AU and VST3 for Apple Silicon and Intel and the VST3 for Windows x64, runs the DSP checks on every platform, validates the Audio Unit with `auval` and all plugin formats with [pluginval](https://github.com/Tracktion/pluginval) at strictness 10. [`release.yml`](.github/workflows/release.yml) publishes the macOS plugin zips and the Windows installer.
+CI ([`build.yml`](.github/workflows/build.yml)) builds AU and VST3 for Apple Silicon and Intel and the VST3 for Windows x64, runs the DSP checks on every platform, validates the Audio Unit with `auval` and all plugin formats with [pluginval](https://github.com/Tracktion/pluginval) at strictness 10. [`release.yml`](.github/workflows/release.yml) publishes the macOS installer (a universal `.pkg` built by [`build/macos/make-pkg.sh`](build/macos/make-pkg.sh)), the macOS plugin zips and the Windows installer. When the repository secrets `MACOS_CERTS_P12`, `MACOS_CERTS_PASSWORD`, `MACOS_NOTARY_APPLE_ID`, `MACOS_NOTARY_PASSWORD` and `MACOS_NOTARY_TEAM_ID` are set (an Apple Developer ID), the release job signs and notarizes the installer, and the "Open Anyway" step disappears.
 
 The logo masters come from `design/logo/make.py`, the README art from `design/banners/render.sh` (headless Chrome) and the theme from `design/theme/tokens.css` (mirrored in `Source/DesignTokens.h`).
 
