@@ -23,6 +23,9 @@ namespace
 {
 constexpr double pi = 3.14159265358979323846;
 
+/** True when the environment variable is set to something (portable: no getenv, which MSVC deprecates). */
+bool envFlag (const char* name) { return juce::SystemStats::getEnvironmentVariable (name, {}).isNotEmpty(); }
+
 struct Note
 {
     double start, length;   // seconds
@@ -185,7 +188,7 @@ Accuracy accuracy (const PitchTrack& t, double delaySeconds, const std::vector<N
         double var = 0;
         for (double e : errs) { var += (e - mean) * (e - mean); sum += std::abs (e); a.maxAbs = std::max (a.maxAbs, std::abs (e)); }
         a.spread = std::max (a.spread, std::sqrt (var / (double) errs.size()));
-        if (std::getenv ("SNAPLINE_VERBOSE") != nullptr)
+        if (envFlag ("SNAPLINE_VERBOSE"))
             std::printf ("      note %.2f: mean %+.1f ct, sd %.1f ct\n", n.midi, mean, std::sqrt (var / (double) errs.size()));
         a.frames += (int) errs.size();
     }
@@ -601,9 +604,9 @@ Artifacts artifactMetrics (const std::vector<float>& ref, const std::vector<floa
     constexpr int hop = 128;
     juce::dsp::FFT fft (order);
     std::vector<float> buf ((size_t) size * 2);
-    const double edges[] { 80.0, 100.0, 125.0, 160.0, 200.0, 250.0, 315.0, 400.0, 500.0, 630.0, 800.0, 1000.0, 1250.0, 1600.0, 2000.0,
-                           2500.0, 3150.0, 4000.0, 5000.0, 6300.0, 8000.0, 10000.0 };
-    constexpr int bandCount = (int) (sizeof (edges) / sizeof (edges[0])) - 1;
+    constexpr int bandCount = 21;
+    constexpr double edges[bandCount + 1] { 80.0, 100.0, 125.0, 160.0, 200.0, 250.0, 315.0, 400.0, 500.0, 630.0, 800.0, 1000.0, 1250.0, 1600.0, 2000.0,
+                                            2500.0, 3150.0, 4000.0, 5000.0, 6300.0, 8000.0, 10000.0 };
     const auto region = [&] (int band) { return edges[band] < 250.0 ? 0 : edges[band] < 2000.0 ? 1 : 2; };
     const auto bandLevels = [&] (const std::vector<float>& x, size_t pos, double* levels)
     {
@@ -761,7 +764,8 @@ int analyseFile (const juce::File& file, const juce::File& outDir, InputType inp
     for (auto& cfg : configs)
     {
         SnaplineDsp dsp;
-        const int block = std::getenv ("SNAPLINE_BLOCK") != nullptr ? std::atoi (std::getenv ("SNAPLINE_BLOCK")) : 512;
+        const int envBlock = juce::SystemStats::getEnvironmentVariable ("SNAPLINE_BLOCK", {}).getIntValue();
+        const int block = envBlock > 0 ? envBlock : 512;
         dsp.prepare (fs, block, cfg.p.mode);
         std::vector<float> l = inL, r = inR;
         std::vector<float> delayAtBlock;
@@ -827,7 +831,7 @@ int analyseFile (const juce::File& file, const juce::File& outDir, InputType inp
                     if (ratio > 1.8f || ratio < 0.55f)
                     {
                         ++octave;
-                        if (std::getenv ("SNAPLINE_VERBOSE") != nullptr && octave <= 30)
+                        if (envFlag ("SNAPLINE_VERBOSE") && octave <= 30)
                             std::printf ("      jump at %.2f s: %.0f -> %.0f Hz (x%.2f)\n", (double) i / (fs / (double) 118), (double) previous, (double) hz, (double) ratio);
                     }
                     else if (std::abs (1200.0f * std::log2 (ratio)) > 70.0f)
@@ -882,7 +886,7 @@ void humanChecks (double fs, Mode mode, const NoteMask cMajor)
     SnaplineDsp probe;
     probe.prepare (fs, 256, mode);
     const double delay = probe.getLatencySamples (mode) / fs + (studio ? 0.0 : 0.03);
-    const auto verbose = std::getenv ("SNAPLINE_VERBOSE") != nullptr;
+    const auto verbose = envFlag ("SNAPLINE_VERBOSE");
 
     // Vibrato: a sustained note with 40 ct vibrato, corrected quickly.
     {
