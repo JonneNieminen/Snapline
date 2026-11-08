@@ -1,0 +1,120 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release-type:
+        description: Release increment when version is blank
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      version:
+        description: Explicit SemVer version, for example 1.2.0
+        type: string
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare version
+    runs-on: ubuntu-26.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Compute version
+        id: version
+        shell: bash
+        env:
+          RELEASE_TYPE: ${{ inputs.release-type }}
+          EXPLICIT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
+          if [[ -n "${EXPLICIT// }" ]]; then
+            version="${EXPLICIT#v}"
+            [[ "$version" =~ $semver ]] || { echo "::error::Version must use SemVer (X.Y.Z or X.Y.Z-pre)."; exit 1; }
+          else
+            latest=$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)
+            latest="${latest:-v0.0.0}"
+            IFS=. read -r major minor patch <<< "${latest#v}"
+            case "$RELEASE_TYPE" in
+              major) version="$((major + 1)).0.0" ;;
+              minor) version="${major}.$((minor + 1)).0" ;;
+              patch) version="${major}.${minor}.$((patch + 1))" ;;
+            esac
+          fi
+          tag="v$version"
+          git rev-parse -q --verify "refs/tags/$tag" >/dev/null && { echo "::error::Tag $tag already exists."; exit 1; } || true
+          [[ "$version" == *-* ]] && prerelease=true || prerelease=false
+          { echo "version=$version"; echo "tag=$tag"; echo "prerelease=$prerelease"; } >> "$GITHUB_OUTPUT"
+
+  package:
+    name: Package macOS (${{ matrix.arch }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-26,       arch: arm64 }
+          - { os: macos-26-intel, arch: x86_64 }
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Fetch JUCE
+        run: git clone --depth 1 --branch 9.0.5 https://github.com/juce-framework/JUCE.git third_party/JUCE
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G "Unix Makefiles"
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
+      - name: Build plugins
+        run: cmake --build build --config Release --target Snapline_VST3 Snapline_AU -j 4
+      - name: Ad-hoc sign bundles
+        run: |
+          for b in VST3/Snapline.vst3 AU/Snapline.component; do
+            codesign --force --deep --sign - "build/Snapline_artefacts/Release/$b"
+          done
+      - name: Package release
+        run: |
+          mkdir -p dist/plugins
+          cp -R build/Snapline_artefacts/Release/VST3/Snapline.vst3 dist/plugins/
+          cp -R build/Snapline_artefacts/Release/AU/Snapline.component dist/plugins/
+          ditto -c -k --sequesterRsrc --keepParent dist/plugins "dist/Snapline-${VERSION}-plugins-macos-${{ matrix.arch }}.zip"
+          rm -rf dist/plugins
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-macos-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub release
+    needs: [prepare, package]
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-macos-*
+          merge-multiple: true
+          path: dist
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: Snapline ${{ needs.prepare.outputs.version }}
+          prerelease: ${{ needs.prepare.outputs.prerelease }}
+          generate_release_notes: true
+          files: dist/*

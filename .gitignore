@@ -1,0 +1,11 @@
+/build/
+/cmake-build-*/
+/.cache/
+/third_party/JUCE/
+/release/
+/dist/
+/renders/
+.DS_Store
+*.user
+*.suo
+*.log

@@ -1,0 +1,1 @@
+Follow the shared project guidance in [`AGENTS.md`](../AGENTS.md). Keep project architecture, DSP safety, parameter compatibility, and design decisions documented there rather than duplicating them here.

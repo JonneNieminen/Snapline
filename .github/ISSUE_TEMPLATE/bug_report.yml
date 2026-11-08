@@ -1,0 +1,60 @@
+name: Bug report
+description: Something in Snapline doesn't work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to report a problem. Please don't attach copyrighted audio; describe the vocal instead (voice type, key, sample rate).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what did you hear or see instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Logic Pro, vocal track, Snapline on the first insert
+        2. Mode: Studio, Key: A, Scale: Minor, Input: Alto/Tenor
+        3. …
+  - type: dropdown
+    id: format
+    attributes:
+      label: Plugin format
+      options: [Audio Unit, VST3]
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: DAW and version
+      placeholder: Logic Pro 11, Reaper 7
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Snapline version
+      placeholder: 1.0.0
+    validations:
+      required: true
+  - type: input
+    id: mac
+    attributes:
+      label: Mac and macOS version
+      placeholder: MacBook Pro M1 Pro, macOS 26.1
+    validations:
+      required: true
+  - type: input
+    id: audio
+    attributes:
+      label: Sample rate and buffer size
+      placeholder: 48 kHz, 128 samples
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error message or logs
+      render: text
