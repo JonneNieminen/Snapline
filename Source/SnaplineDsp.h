@@ -32,6 +32,7 @@ struct SnaplineParams
     float throat = 100.0f;          // % of natural throat length
     float mix = 100.0f;             // %
     float outputDb = 0.0f;
+    bool bypass = false;            // soft bypass: crossfade (12 ms) to the dry signal at the reported latency
 };
 
 /** One analysis frame for the interface. */

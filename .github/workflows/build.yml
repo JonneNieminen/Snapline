@@ -39,6 +39,10 @@ jobs:
         run: cmake --build build --config Release --target Snapline_VST3 Snapline_AU SnaplineRender -j 4
       - name: DSP checks
         run: build/SnaplineRender_artefacts/Release/SnaplineRender
+      - name: Plugin checks
+        run: |
+          cmake --build build --config Release --target SnaplineSnapshot -j 4
+          build/SnaplineSnapshot_artefacts/Release/SnaplineSnapshot --check
       - name: Ad-hoc sign bundles
         run: |
           for b in VST3/Snapline.vst3 AU/Snapline.component; do

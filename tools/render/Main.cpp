@@ -744,6 +744,40 @@ int main (int argc, char** argv)
                    100.0 * r.seconds / (melodyEnd + 0.4)));
         }
 
+        // Soft bypass: engaged for the second half it must give the delayed dry signal without clicks.
+        {
+            SnaplineParams p;
+            p.mode = Mode::studio;
+            p.allowed = cMajor;
+            p.retuneMs = 0.0f;
+            p.naturalVibrato = -100.0f;
+            SnaplineDsp dsp;
+            dsp.prepare (fs, 256, Mode::studio);
+            auto out = vocal;
+            const size_t switchAt = (size_t) (3.0 * fs);
+            for (size_t pos = 0; pos < vocal.size(); pos += 256)
+            {
+                const int n = (int) std::min<size_t> (256, vocal.size() - pos);
+                p.bypass = pos >= switchAt;
+                dsp.process (out.data() + pos, nullptr, out.data() + pos, nullptr, n, p);
+                DisplayFrame frames[256];
+                while (dsp.popDisplayFrames (frames, 256) > 0) {}
+            }
+            const int lag = dsp.getLatencySamples (Mode::studio);
+            // After the 12 ms fade (and a margin) the output is the dry signal at the reported latency.
+            const size_t settled = switchAt + (size_t) (0.1 * fs);
+            std::vector<float> a (vocal.begin() + (std::ptrdiff_t) (settled - (size_t) lag), vocal.end() - lag), b (out.begin() + (std::ptrdiff_t) settled, out.end());
+            const size_t len = std::min (a.size(), b.size());
+            a.resize (len);
+            b.resize (len);
+            const double depth = nullDepth (a, b, 0);
+            // The jump is judged against the processed signal it fades from.
+            const double click = clickIndex (out, fs, switchAt - (size_t) (0.05 * fs), switchAt + (size_t) (0.1 * fs));
+            const double ref = clickIndex (vocal, fs, switchAt - (size_t) (0.05 * fs), switchAt + (size_t) (0.1 * fs));
+            check (depth > 90.0 && click <= 1.5 * ref + 1.0, "soft bypass: dry at the reported latency, no click",
+                   juce::String::formatted ("null %.0f dB, click index %.1f (input %.1f)", depth, click, ref));
+        }
+
         // Worst case for the CPU: a voice that never pauses (nothing to skip), best of three runs.
         {
             const std::vector<Note> sung { { 0.0, 1.6, 57.35, 30.0 }, { 1.6, 1.6, 59.72, 30.0 }, { 3.2, 1.6, 62.15, 30.0 }, { 4.8, 1.6, 60.4, 30.0 } };

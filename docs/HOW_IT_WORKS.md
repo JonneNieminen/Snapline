@@ -31,6 +31,12 @@ For every voiced frame:
 
 A grain can only be built once a full period after its centre has arrived. **Studio** delays the output by a fixed 100 ms, which always leaves enough input for every grain and the 21 ms look-ahead. That delay is reported to the host, so playback stays in time. **Live** starts at 8 ms and adds delay only when a grain's source isn't available yet, then slowly gives it back. In practice it settles at 8–20 ms (about two to three periods of the voice), and the header shows the current figure. The host can't compensate for this varying delay, so use Studio for the final pass.
 
+## Bypass and presets
+
+**Bypass** fades (about 12 ms) to the original vocal delayed by the reported latency, so switching it never shifts the audio against the rest of the project. Hosts that offer a bypass button use the same parameter. While bypassed (or at 0 % Mix) Snapline stops resynthesising but keeps tracking the pitch.
+
+**User presets** store the correction style (retune, humanize, tolerance, amount, vibrato, natural vibrato, formants, throat) as small XML files in your application-data folder (`Presets` inside a `Snapline` folder). They never contain key, scale, input type, MIDI, mix or output. Choose *Save preset...* in the preset menu; *Show presets folder* opens the folder.
+
 ## Checks
 
 `SnaplineRender` renders a synthetic vocal (band-limited glottal source through three formant resonators, sung up to 42 cents off the scale, with vibrato and a slide) at 44.1, 48 and 96 kHz. It verifies:
@@ -40,6 +46,7 @@ A grain can only be built once a full period after its centre has arrived. **Stu
 - level, clipping and NaNs
 - the Studio null and its reported latency, and the Live delay range
 - vibrato kept or flattened by *Natural vibrato*, scoops kept and settled, no clicks or spectral jumps at voiced/unvoiced edges, and period jitter on a breathy low voice
+- soft bypass (dry at the reported latency, no click)
 - transpose, MIDI forcing, formant shift, odd block sizes, silence and CPU cost
 
 ## Limits

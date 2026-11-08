@@ -54,8 +54,142 @@ void feed (SnaplineAudioProcessor& processor, double fs, double seconds)
 }
 }
 
+namespace
+{
+int failures = 0;
+
+void check (bool ok, const juce::String& what)
+{
+    std::printf ("  [%s] %s\n", ok ? " ok " : "FAIL", what.toRawUTF8());
+    if (! ok) ++failures;
+}
+
+float value (SnaplineAudioProcessor& p, const char* id) { return p.parameters.getRawParameterValue (id)->load(); }
+
+void set (SnaplineAudioProcessor& p, const char* id, float v)
+{
+    auto* parameter = p.parameters.getParameter (id);
+    parameter->setValueNotifyingHost (parameter->convertTo0to1 (v));
+}
+
+void collect (juce::Component& c, std::vector<juce::Component*>& out)
+{
+    for (auto* child : c.getChildren())
+    {
+        out.push_back (child);
+        collect (*child, out);
+    }
+}
+
+std::unique_ptr<SnaplineAudioProcessor> makeProcessor()
+{
+    std::unique_ptr<SnaplineAudioProcessor> p (static_cast<SnaplineAudioProcessor*> (createPluginFilter()));
+    p->setPlayConfigDetails (2, 2, 48000.0, 256);
+    p->prepareToPlay (48000.0, 256);
+    return p;
+}
+
+/** Plugin-level checks that need no DAW: bypass parameter, user presets, session state, editor scaling, accessibility. */
+int runChecks()
+{
+    juce::ScopedJuceInitialiser_GUI gui;
+    std::printf ("Plugin checks\n");
+
+    auto processor = makeProcessor();
+    check (processor->getBypassParameter() != nullptr && processor->getBypassParameter()->getName (32) == "Bypass",
+           "host bypass parameter is exposed (getBypassParameter)");
+
+    // User presets: only the correction style is stored, as XML, in a folder of our choosing.
+    const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("snapline-preset-check");
+    folder.deleteRecursively();
+    processor->setUserPresetDirectory (folder);
+    set (*processor, "retune", 123.0f);
+    set (*processor, "humanize", 61.0f);
+    set (*processor, "naturalVibrato", -35.0f);
+    set (*processor, "mix", 37.0f);
+    set (*processor, "key", 4.0f);
+    check (processor->saveUserPreset ("My Style"), "save a user preset");
+    check (processor->saveUserPreset ("../escape/Name?"), "a hostile name is made safe");
+    check (processor->listUserPresets().contains ("My Style") && folder.findChildFiles (juce::File::findFiles, false, "*.xml").size() == 2
+               && ! folder.getParentDirectory().getChildFile ("escape").exists(),
+           "presets are listed and stay inside the preset folder");
+    const auto xml = juce::XmlDocument::parse (folder.findChildFiles (juce::File::findFiles, false, "My*.xml").getFirst());
+    check (xml != nullptr && xml->hasTagName ("SnaplinePreset") && xml->getNumChildElements() == 11, "the file is XML with the 11 style parameters");
+    set (*processor, "retune", 5.0f);
+    set (*processor, "humanize", 0.0f);
+    set (*processor, "naturalVibrato", 80.0f);
+    set (*processor, "mix", 50.0f);
+    set (*processor, "key", 7.0f);
+    processor->presetModified.store (true);
+    check (processor->loadUserPreset ("My Style"), "load a user preset");
+    check (std::abs (value (*processor, "retune") - 123.0f) < 0.2f && std::abs (value (*processor, "humanize") - 61.0f) < 0.2f
+               && std::abs (value (*processor, "naturalVibrato") + 35.0f) < 0.2f,
+           "style parameters come back");
+    check (std::abs (value (*processor, "mix") - 50.0f) < 0.2f && std::abs (value (*processor, "key") - 7.0f) < 0.2f,
+           "mix and key are left alone");
+    check (! processor->presetModified.load() && processor->getUserPresetName() == "My Style", "loaded preset is current, not modified");
+    set (*processor, "retune", 40.0f);
+    check (processor->presetModified.load(), "moving a style control marks it modified");
+    check (! processor->loadUserPreset ("Does not exist"), "a missing preset fails cleanly");
+
+    // Session state: preset name and editor size survive save and restore.
+    processor->loadUserPreset ("My Style");
+    processor->editorScale = 1.25f;
+    juce::MemoryBlock state;
+    processor->getStateInformation (state);
+    auto restored = makeProcessor();
+    restored->setStateInformation (state.getData(), (int) state.getSize());
+    check (restored->getUserPresetName() == "My Style" && std::abs (restored->editorScale - 1.25f) < 1.0e-4f
+               && std::abs (value (*restored, "retune") - 123.0f) < 0.2f,
+           "user preset name, editor size and parameters restore");
+    check (value (*restored, "bypass") < 0.5f, "bypass defaults to off");
+
+    // Editor: resizable 75-150 %, every control has a title and a tooltip.
+    std::unique_ptr<juce::AudioProcessorEditor> editor (processor->createEditor());
+    editor->setVisible (true);
+    check (editor->getWidth() == 1350 && editor->getHeight() == 950, "editor opens at the saved size (125 %)");
+    check (editor->isResizable(), "editor is resizable");
+    auto* limits = editor->getConstrainer();
+    check (limits != nullptr && limits->getMinimumWidth() == 810 && limits->getMinimumHeight() == 570, "minimum size is 75 %");
+    check (limits != nullptr && limits->getMaximumWidth() == 1620 && limits->getMaximumHeight() == 1140, "maximum size is 150 %");
+    juce::Rectangle<int> dragged (0, 0, 5000, 5000);
+    limits->checkBounds (dragged, editor->getBounds(), juce::Rectangle<int> (0, 0, 4000, 4000), false, false, false, false);
+    check (dragged.getWidth() <= 1620 && dragged.getHeight() <= 1140 && std::abs ((double) dragged.getWidth() / dragged.getHeight() - 1080.0 / 760.0) < 0.01,
+           "dragging past the limit stays within 150 % at the same proportions");
+    editor->setSize (1620, 1140);
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+    check (std::abs (processor->editorScale - 1.5f) < 1.0e-3f, "the editor reports its size to the session");
+    auto image = editor->createComponentSnapshot (editor->getLocalBounds(), true, 1.0f);
+    check (image.getWidth() == 1620, "renders at 150 %");
+
+    std::vector<juce::Component*> all;
+    collect (*editor, all);
+    int controls = 0, untitled = 0, untipped = 0;
+    for (auto* c : all)
+    {
+        auto* tip = dynamic_cast<juce::SettableTooltipClient*> (c);
+        const bool isControl = dynamic_cast<juce::Slider*> (c) != nullptr || dynamic_cast<juce::ComboBox*> (c) != nullptr
+                               || dynamic_cast<juce::Button*> (c) != nullptr || tip != nullptr;
+        if (! isControl || c->getParentComponent() == nullptr || dynamic_cast<juce::ComboBox*> (c->getParentComponent()) != nullptr)
+            continue;
+        ++controls;
+        if (c->getTitle().isEmpty()) { ++untitled; std::printf ("      no title: %s\n", typeid (*c).name()); }
+        if (tip != nullptr && tip->getTooltip().isEmpty()) { ++untipped; std::printf ("      no tooltip: %s (%s)\n", typeid (*c).name(), c->getTitle().toRawUTF8()); }
+    }
+    check (controls >= 20 && untitled == 0, juce::String (controls) + " controls, each with an accessibility title");
+    check (untipped == 0, "every control has a tooltip");
+
+    editor.reset();
+    folder.deleteRecursively();
+    std::printf ("\n%s\n", failures == 0 ? "All plugin checks passed." : (juce::String (failures) + " plugin check(s) failed.").toRawUTF8());
+    return failures == 0 ? 0 : 1;
+}
+}
+
 int main (int argc, char** argv)
 {
+    if (argc > 1 && juce::String (argv[1]) == "--check")
+        return runChecks();
     juce::ScopedJuceInitialiser_GUI gui;
     const auto outDir = juce::File::getCurrentWorkingDirectory().getChildFile (argc > 1 ? argv[1] : "docs/screenshots");
     outDir.createDirectory();

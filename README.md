@@ -95,6 +95,9 @@ Then rescan plugins in your DAW. In Logic Pro, Snapline is under **Audio Units �
 | **Transpose** | Shifts the corrected pitch by up to an octave. |
 | **Mix · Output** | Dry/wet blend (time-aligned in Studio) and output level. |
 | **A4 tuning** | Reference pitch, 415–466 Hz. |
+| **Bypass** | Soft bypass: fades to the original vocal at the same delay. Also the host's bypass button. |
+| **Preset menu** | *Save preset...* stores your correction style as XML; *Show presets folder* opens it. |
+| **Window size** | Drag the corner handle: 75–150 %, saved with the session. |
 | **MIDI notes** | *Snap to held notes* uses held MIDI notes as the scale; *Force to held note* sets the exact target. |
 
 ### MIDI control
@@ -122,6 +125,7 @@ Products appear under `build/Snapline_artefacts/Release/`. Use `x86_64` for Inte
 
 Developer tools build with `-DSNAPLINE_BUILD_TOOLS=ON`:
 
+- `SnaplineSnapshot --check` tests the plugin without a DAW: bypass parameter, user presets, saved state, editor sizes, accessibility titles and tooltips.
 - `SnaplineRender [wav-dir]` renders a synthetic off-key vocal at 44.1, 48 and 96 kHz. It checks pitch accuracy, transparency, latency, formants, transpose, MIDI forcing, block sizes, silence and CPU cost, and optionally writes WAV files.
 - `SnaplineSnapshot [dir]` renders the interface in both themes to PNG (the screenshots above).
 

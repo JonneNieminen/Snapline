@@ -135,7 +135,7 @@ struct SnaplineDsp::Impl
     bool centreValid = false;
 
     // Output smoothing
-    float mixSmoothed = 1.0f, gainSmoothed = 1.0f;
+    float mixSmoothed = 1.0f, gainSmoothed = 1.0f, bypassSmoothed = 0.0f; // bypassSmoothed: 1 = fully dry
 
     juce::AbstractFifo displayFifo { displayCapacity };
     std::array<DisplayFrame, displayCapacity> displayFrames {};
@@ -189,6 +189,7 @@ struct SnaplineDsp::Impl
         vibratoPhase = 0.0;
         centreA = centreB = 0.0f;
         centreValid = false;
+        bypassSmoothed = 0.0f;
         applyMode (mode);
         synthPos = (double) latency;
         extraDelay = 0.0;
@@ -833,15 +834,18 @@ struct SnaplineDsp::Impl
             }
         }
         placeMarks();
-        // Mix at zero (and settled): the wet signal is not heard, so skip the resynthesis.
+        // Mix at zero or bypass engaged (and settled): the wet signal is not heard, so skip the resynthesis.
         // Tracking continues for the display; grains resume from the next block.
-        if (p.mix > 0.0f || mixSmoothed > 1.0e-4f)
+        const bool wetHeard = (p.mix > 0.0f || mixSmoothed > 1.0e-4f) && (! p.bypass || bypassSmoothed < 1.0f - 1.0e-4f);
+        if (wetHeard)
             scheduleGrains (blockStart, now);
         effectiveDelay.store ((float) (latency + extraDelay), std::memory_order_relaxed);
 
         const float mixTarget = juce::jlimit (0.0f, 1.0f, p.mix * 0.01f);
         const float gainTarget = juce::Decibels::decibelsToGain (p.outputDb);
         const float smooth = 1.0f - std::exp (-1.0f / (0.02f * (float) fs));
+        const float bypassSmooth = 1.0f - std::exp (-1.0f / (0.004f * (float) fs)); // about 12 ms to settle
+        const float bypassTarget = p.bypass ? 1.0f : 0.0f;
         for (int i = 0; i < numSamples; ++i)
         {
             const std::int64_t o = blockStart + i;
@@ -855,9 +859,15 @@ struct SnaplineDsp::Impl
             const float dr = dryPos >= 0 ? dryR[(size_t) (dryPos & ringMask)] : 0.0f;
             mixSmoothed += smooth * (mixTarget - mixSmoothed);
             gainSmoothed += smooth * (gainTarget - gainSmoothed);
-            outL[i] = (wet * mixSmoothed + dl * (1.0f - mixSmoothed)) * gainSmoothed;
+            bypassSmoothed += bypassSmooth * (bypassTarget - bypassSmoothed);
+            // The dry path is delayed by the reported latency, so bypassing never shifts timing.
+            const float processedL = (wet * mixSmoothed + dl * (1.0f - mixSmoothed)) * gainSmoothed;
+            outL[i] = processedL + bypassSmoothed * (dl - processedL);
             if (outR != nullptr)
-                outR[i] = (wet * mixSmoothed + dr * (1.0f - mixSmoothed)) * gainSmoothed;
+            {
+                const float processedR = (wet * mixSmoothed + dr * (1.0f - mixSmoothed)) * gainSmoothed;
+                outR[i] = processedR + bypassSmoothed * (dr - processedR);
+            }
         }
         params = nullptr;
     }

@@ -23,6 +23,7 @@ constexpr auto formantId = "formantShift";
 constexpr auto throatId = "throat";
 constexpr auto mixId = "mix";
 constexpr auto outputId = "output";
+constexpr auto bypassId = "bypass";
 
 juce::String noteId (int pitchClass) { return "note" + juce::String (pitchClass); }
 
@@ -91,6 +92,7 @@ SnaplineAudioProcessor::SnaplineAudioProcessor()
     raw.throat = get (throatId);
     raw.mix = get (mixId);
     raw.output = get (outputId);
+    raw.bypass = get (bypassId);
 
     for (const auto& id : presetParameterIds)
         parameters.addParameterListener (id, this);
@@ -147,6 +149,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout SnaplineAudioProcessor::crea
     p.add (std::make_unique<Float> (juce::ParameterID { throatId, 1 }, "Throat Length", Range (60.0f, 160.0f, 0.1f), 100.0f, withUnit ("%", 0)));
     p.add (std::make_unique<Float> (juce::ParameterID { mixId, 1 }, "Mix", Range (0.0f, 100.0f, 0.1f), 100.0f, withUnit ("%", 0)));
     p.add (std::make_unique<Float> (juce::ParameterID { outputId, 1 }, "Output", Range (-24.0f, 12.0f, 0.01f), 0.0f, withUnit (" dB", 1)));
+    p.add (std::make_unique<Bool> (juce::ParameterID { bypassId, 1 }, "Bypass", false));
     return p;
 }
 
@@ -249,6 +252,7 @@ snapline::SnaplineParams SnaplineAudioProcessor::readParameters()
     p.throat = read (raw.throat);
     p.mix = read (raw.mix);
     p.outputDb = read (raw.output);
+    p.bypass = read (raw.bypass) >= 0.5f;
     return p;
 }
 
@@ -307,6 +311,108 @@ void SnaplineAudioProcessor::setCurrentProgram (int index)
     applyingPreset = false;
     currentPreset.store (index);
     presetModified.store (false);
+    const juce::ScopedLock lock (presetLock);
+    userPresetName = {};
+}
+
+// ---------------------------------------------------------------------------- user presets
+juce::File SnaplineAudioProcessor::getUserPresetDirectory() const
+{
+    if (userPresetDirectoryOverride != juce::File())
+        return userPresetDirectoryOverride;
+    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory).getChildFile ("Snapline").getChildFile ("Presets");
+}
+
+void SnaplineAudioProcessor::setUserPresetDirectory (const juce::File& directory) { userPresetDirectoryOverride = directory; }
+
+juce::String SnaplineAudioProcessor::getUserPresetName() const
+{
+    const juce::ScopedLock lock (presetLock);
+    return userPresetName;
+}
+
+namespace
+{
+constexpr auto presetTag = "SnaplinePreset";
+
+std::unique_ptr<juce::XmlElement> readPresetFile (const juce::File& file)
+{
+    auto xml = juce::XmlDocument::parse (file);
+    return xml != nullptr && xml->hasTagName (presetTag) ? std::move (xml) : nullptr;
+}
+}
+
+juce::StringArray SnaplineAudioProcessor::listUserPresets() const
+{
+    juce::StringArray names;
+    for (const auto& file : getUserPresetDirectory().findChildFiles (juce::File::findFiles, false, "*.xml"))
+        if (auto xml = readPresetFile (file))
+            names.add (xml->getStringAttribute ("name", file.getFileNameWithoutExtension()));
+    names.sort (true);
+    return names;
+}
+
+juce::File SnaplineAudioProcessor::findUserPresetFile (const juce::String& name) const
+{
+    for (const auto& file : getUserPresetDirectory().findChildFiles (juce::File::findFiles, false, "*.xml"))
+        if (auto xml = readPresetFile (file))
+            if (xml->getStringAttribute ("name", file.getFileNameWithoutExtension()) == name)
+                return file;
+    return {};
+}
+
+bool SnaplineAudioProcessor::saveUserPreset (const juce::String& rawName)
+{
+    const auto name = rawName.trim().substring (0, 64);
+    const auto fileName = juce::File::createLegalFileName (name);
+    if (name.isEmpty() || fileName.isEmpty())
+        return false;
+    auto directory = getUserPresetDirectory();
+    if (! directory.createDirectory())
+        return false;
+
+    juce::XmlElement root (presetTag);
+    root.setAttribute ("version", 1);
+    root.setAttribute ("name", name);
+    for (const auto& id : presetParameterIds)
+        if (auto* parameter = parameters.getParameter (id))
+        {
+            auto* child = root.createNewChildElement ("Param");
+            child->setAttribute ("id", id);
+            child->setAttribute ("value", (double) parameter->convertFrom0to1 (parameter->getValue()));
+        }
+
+    auto file = findUserPresetFile (name);
+    if (file == juce::File())
+        file = directory.getChildFile (fileName + ".xml");
+    if (! file.replaceWithText (root.toString()))
+        return false;
+    const juce::ScopedLock lock (presetLock);
+    userPresetName = name;
+    presetModified.store (false);
+    return true;
+}
+
+bool SnaplineAudioProcessor::loadUserPreset (const juce::String& name)
+{
+    const auto file = findUserPresetFile (name);
+    if (file == juce::File())
+        return false;
+    auto xml = readPresetFile (file);
+    if (xml == nullptr)
+        return false;
+    applyingPreset = true;
+    for (auto* child : xml->getChildWithTagNameIterator ("Param"))
+    {
+        const auto id = child->getStringAttribute ("id");
+        if (presetParameterIds.contains (id)) // never key, scale, input type, mode, MIDI, mix or output
+            setParameterValue (parameters, id, (float) child->getDoubleAttribute ("value"));
+    }
+    applyingPreset = false;
+    presetModified.store (false);
+    const juce::ScopedLock lock (presetLock);
+    userPresetName = name;
+    return true;
 }
 
 const juce::String SnaplineAudioProcessor::getProgramName (int index)
@@ -320,6 +426,8 @@ void SnaplineAudioProcessor::getStateInformation (juce::MemoryBlock& dest)
     state.setProperty ("preset", currentPreset.load(), nullptr);
     state.setProperty ("presetModified", presetModified.load(), nullptr);
     state.setProperty ("theme", theme, nullptr);
+    state.setProperty ("editorScale", editorScale, nullptr);
+    state.setProperty ("userPreset", getUserPresetName(), nullptr);
     std::unique_ptr<juce::XmlElement> xml (state.createXml());
     copyXmlToBinary (*xml, dest);
 }
@@ -336,6 +444,9 @@ void SnaplineAudioProcessor::setStateInformation (const void* data, int size)
         applyingPreset = false;
         presetModified.store ((bool) state.getProperty ("presetModified", ! state.hasProperty ("preset")));
         theme = state.getProperty ("theme", "dark").toString() == "light" ? "light" : "dark";
+        editorScale = juce::jlimit (0.75f, 1.5f, (float) (double) state.getProperty ("editorScale", 1.0));
+        const juce::ScopedLock lock (presetLock);
+        userPresetName = state.getProperty ("userPreset", "").toString();
     }
 }
 

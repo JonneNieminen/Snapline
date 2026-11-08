@@ -37,11 +37,11 @@ Source/
   Presets.h              Factory correction styles (never key/scale/mode).
   PluginProcessor.h/.cpp APVTS parameters, cached raw parameter pointers, MIDI note state,
                          presets as programs, latency reporting, state save/restore, theme.
-  PluginEditor.h/.cpp    LookAndFeel, Segmented, ParameterRow, NoteStrip, editor layout.
+  PluginEditor.h/.cpp    LookAndFeel, Segmented, ParameterRow, NoteStrip, editor layout, preset menu, scaling.
   PitchGraph.h/.cpp      Scrolling pitch display + note/deviation/correction readouts.
   DesignTokens.h         Dark and light palettes (mirrors design/theme/tokens.css).
 tools/render             SnaplineRender: offline DSP quality, latency and CPU checks.
-tools/snapshot           SnaplineSnapshot: renders the editor (both themes) to PNG.
+tools/snapshot           SnaplineSnapshot: renders the editor (both themes) to PNG; `--check` runs plugin-level tests (presets, state, resizing, titles).
 design/                  logo (make.py), banners (art.html + render.sh), theme (tokens.css).
 build/windows            Inno Setup script.
 ```
@@ -104,7 +104,7 @@ One mark per period at the peak of the low-passed signal within ±P/4 of `last +
 - Mode changes are applied inside `process` and reported via `AsyncUpdater`; `mode` is not automatable.
 
 ### 5.6 Output
-Dry (delayed by `latency`, per channel) / wet (mono) mix and output gain, both smoothed (20 ms).
+Dry (delayed by `latency`, per channel) / wet (mono) mix and output gain, both smoothed (20 ms). **Bypass** crossfades (about 12 ms) from that result to the same latency-delayed dry signal, so bypassing never moves the audio in time relative to what the host compensates (in Live mode the processed path can be a few ms later than the reported 8 ms, so a fade there is a brief comb, not a click). Once bypass is settled, or Mix is 0, the resynthesis is skipped; tracking continues so the display and the retune state stay valid.
 
 ## 6. Parameters (IDs are permanent)
 
@@ -128,12 +128,13 @@ Dry (delayed by `latency`, per channel) / wet (mono) mix and output gain, both s
 | `formantShift` | Formant Shift | −6…6 st | 0 |
 | `throat` | Throat Length | 60–160 % | 100 |
 | `mix` / `output` | Mix / Output | 0–100 % / −24…12 dB | 100 / 0 |
+| `bypass` | Bypass | bool; also the host's bypass (`getBypassParameter`) | off |
 
-New parameters get new IDs (version 1 in `juce::ParameterID`). Never rename or reinterpret an existing ID. Non-parameter state (preset index, modified flag, theme) is stored as properties of the APVTS state tree.
+New parameters get new IDs (version 1 in `juce::ParameterID`). Never rename or reinterpret an existing ID. Non-parameter state (preset index, modified flag, user preset name, theme, editor scale) is stored as properties of the APVTS state tree.
 
 ## 7. Interface and theme
 
-- Size 1080 × 760. Sidebar 248 px (`sidebar` colour): wordmark, Preset, Key + Scale, Target notes (one-octave `NoteStrip`, click toggles a note and switches to Custom), Input type, MIDI notes, Dark/Light switch, footer note.
+- Size 1080 × 760 at 100 %; resizable from 75 to 150 % at a fixed aspect ratio (corner handle, `ComponentBoundsConstrainer`). All controls live in a `holder` component laid out at 1080 × 760 and scaled with one transform; `editor::paint` applies the same scale. The size is saved with the session (`editorScale`). Sidebar 248 px (`sidebar` colour): wordmark, Preset, Key + Scale, Target notes (one-octave `NoteStrip`, click toggles a note and switches to Custom), Input type, MIDI notes, Bypass switch, Dark/Light switch, footer note.
 - Main column: header (preset name; chips for scale, voice and mode with live delay; preset description; Live/Studio `Segmented`; output meter), `PitchGraph` card (current target note, sung deviation, ±100 ct correction meter, 5 s of sung (faint) and corrected (vocal) pitch over semitone lanes with target notes highlighted), then four cards: **Correction** (Retune speed, Humanize, Tolerance, Amount), **Vibrato** (Depth, Rate, Onset), **Character** (Formant, Throat, Transpose, Preserve formants switch), **Output** (Mix, Output, A4 tuning).
 - Components: `ParameterRow` (label, flat slider, value; double-click resets), `Segmented`, macOS-style switch, flat combo boxes, rounded tooltips. Every control has a plain-language tooltip.
 - Tokens: `Source/DesignTokens.h` ↔ `design/theme/tokens.css` (Prism's values + `vocal`, `sung`, lanes, `tile`). No gradients, glass or glows. Mark ("Snap"): `design/logo/make.py`, drawn in-plugin from the same SVG paths.
@@ -186,7 +187,9 @@ Also run: `auval -strict -v aumf SNL1 SNPL`, `SnaplineSnapshot docs/screenshots`
 
 1. ~~**More human by default**~~ (done: natural vibrato with a `naturalVibrato` parameter, onset ramp, cross-correlation mark refinement, voiced/unvoiced edge fade, and render checks for each; see section 8. Factory presets set `naturalVibrato` to 0 except Hard Tune and Robot (−100). Sessions saved before this change load with the new parameter at 0, so vibrato now passes through at their retune speeds.)
 2. ~~**Efficiency**~~ (done: window table, constant-weight or integral reads, silence and `mix = 0` early-outs, minimal YIN FFT per input type; 0.60 % / 0.71 % of one core at 48 kHz, see section 8. An Instruments profile of a host session is still worth doing.)
-3. **Completeness**: a soft *Bypass* parameter (latency-compensated crossfade, `getBypassParameter`); user presets saved as XML in the user's application-data folder, loaded and saved on the message thread; resizable editor (75–150 % scale); keyboard and accessibility titles for every control.
+3. ~~**Completeness**~~ (done: soft `bypass` parameter exposed through `getBypassParameter`; user presets as XML in the application-data folder, saved and loaded on the message thread; resizable editor 75–150 %; accessibility titles for every control. Checked by `SnaplineRender` (bypass) and `SnaplineSnapshot --check` (presets, state, sizes, titles, tooltips). Known gap: the note strip is mouse-only and the Live/Studio and Dark/Light switches take left/right keys but show no focus ring.)
+
+   *User presets*: `~/Library/Application Support/Snapline/Presets/*.xml` on macOS, `%APPDATA%\Snapline\Presets` on Windows. A file is `<SnaplinePreset version="1" name="…">` with one `<Param id value/>` per correction-style parameter (the same 11 a factory preset sets; never key, scale, input type, mode, MIDI, mix, output or bypass). File names are sanitised; unknown IDs in a file are ignored.
 4. **Validation**: add [pluginval](https://github.com/Tracktion/pluginval) (strictness 10) for AU and VST3 on macOS and VST3 on Windows in `build.yml`; confirm the Windows jobs and installer on GitHub.
 
 Each change: keep the rules in `AGENTS.md`, update `HOW_IT_WORKS.md`, README tables and screenshots when behaviour or UI changes, and keep "All checks passed."

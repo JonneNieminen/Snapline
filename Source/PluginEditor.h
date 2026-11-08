@@ -21,6 +21,7 @@ public:
     void drawToggleButton (juce::Graphics&, juce::ToggleButton&, bool highlighted, bool down) override;
     void drawTooltip (juce::Graphics&, const juce::String& text, int width, int height) override;
     juce::Rectangle<int> getTooltipBounds (const juce::String& tipText, juce::Point<int> screenPos, juce::Rectangle<int> parentArea) override;
+    void drawCornerResizer (juce::Graphics&, int width, int height, bool isMouseOver, bool isMouseDragging) override;
 
 private:
     snapline::theme::Palette colours = snapline::theme::darkPalette();
@@ -37,6 +38,7 @@ public:
     void setPalette (const snapline::theme::Palette* p) { colours = p; repaint(); }
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
+    bool keyPressed (const juce::KeyPress&) override;
 
 private:
     juce::StringArray labels;
@@ -92,7 +94,11 @@ public:
 private:
     void timerCallback() override;
     void applyTheme();
-    void configureCombo (juce::ComboBox&, const juce::String& tooltip);
+    void configureCombo (juce::ComboBox&, const juce::String& title, const juce::String& tooltip);
+    void rebuildPresetMenu();
+    void promptSavePreset();
+    float uiScale() const { return (float) getWidth() / 1080.0f; }
+    juce::Rectangle<int> toEditor (juce::Rectangle<int> baseArea) const;
     void paintCard (juce::Graphics&, juce::Rectangle<int>, const juce::String& title);
     void paintWordmark (juce::Graphics&, juce::Point<float>);
     void paintHeader (juce::Graphics&);
@@ -109,6 +115,9 @@ private:
     Segmented modeSwitch { { "Live", "Studio" } };
     Segmented themeSwitch { { "Dark", "Light" } };
     juce::ToggleButton preserveFormants { "Preserve formants" };
+    juce::ToggleButton bypass { "Bypass" };
+    juce::Component holder;                // all controls live here at 1080 x 760 and are scaled as one
+    juce::StringArray userPresetNames;
 
     ParameterRow retune, humanize, tolerance, amount;
     ParameterRow vibratoDepth, vibratoRate, vibratoOnset, naturalVibrato;
@@ -118,7 +127,7 @@ private:
     std::unique_ptr<juce::ParameterAttachment> modeAttachment;
     using ComboAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
     std::unique_ptr<ComboAttachment> keyAttachment, scaleAttachment, inputTypeAttachment, midiModeAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> preserveAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> preserveAttachment, bypassAttachment;
 
     juce::Rectangle<int> sidebar, header, cards[4];
     juce::String headerTitle, headerSubtitle;

@@ -17,6 +17,8 @@ public:
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
+    juce::AudioProcessorParameter* getBypassParameter() const override { return parameters.getParameter ("bypass"); }
+
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
     const juce::String getName() const override { return JucePlugin_Name; }
@@ -37,6 +39,18 @@ public:
     snapline::NoteMask getHeldMidiNotes() const { return heldMask.load (std::memory_order_relaxed); }
     snapline::NoteMask scaleNotes() const;
 
+    /**
+        User presets: correction-style settings (the same parameters a factory preset sets) as XML
+        files in the user's application-data folder. Message thread only; never touched by the
+        audio thread.
+    */
+    juce::File getUserPresetDirectory() const;
+    void setUserPresetDirectory (const juce::File&);          // tests and portable setups
+    juce::StringArray listUserPresets() const;                 // names, sorted
+    bool saveUserPreset (const juce::String& name);
+    bool loadUserPreset (const juce::String& name);
+    juce::String getUserPresetName() const;                    // empty when a factory preset is current
+
     /** Copies the current scale into the note toggles, flips one note and switches to Custom. */
     void toggleNote (int pitchClass);
 
@@ -55,6 +69,8 @@ public:
     std::atomic<bool> presetModified { false };
     /** "dark" or "light"; editor-only, saved with the session. */
     juce::String theme { "dark" };
+    /** Editor size relative to 1080 x 760 (0.75-1.5); editor-only, saved with the session. */
+    float editorScale = 1.0f;
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
 private:
@@ -66,6 +82,10 @@ private:
     std::array<bool, 128> held {};
     int lastHeldNote = -1;
     bool applyingPreset = false;
+    mutable juce::CriticalSection presetLock;
+    juce::String userPresetName;
+    juce::File userPresetDirectoryOverride;
+    juce::File findUserPresetFile (const juce::String& name) const;
 
     /** Raw parameter values, looked up once so the audio thread never searches by ID. */
     struct RawParameters
@@ -91,6 +111,7 @@ private:
         std::atomic<float>* throat = nullptr;
         std::atomic<float>* mix = nullptr;
         std::atomic<float>* output = nullptr;
+        std::atomic<float>* bypass = nullptr;
     } raw;
 
     snapline::SnaplineParams readParameters();

@@ -6,6 +6,7 @@ using snapline::theme::uiFont;
 constexpr int editorWidth = 1080;
 constexpr int editorHeight = 760;
 constexpr int sidebarWidth = 248;
+constexpr int userPresetBase = 100, savePresetId = 1000, showFolderId = 1001;
 
 const juce::String dot = juce::String::fromUTF8 (" \xc2\xb7 ");
 
@@ -32,6 +33,23 @@ void SnaplineLookAndFeel::setPalette (const snapline::theme::Palette& p)
     setColour (juce::TooltipWindow::textColourId, p.tooltipText);
     setColour (juce::TooltipWindow::backgroundColourId, p.tooltipBackground);
     setColour (juce::TooltipWindow::outlineColourId, juce::Colours::transparentBlack);
+    setColour (juce::AlertWindow::backgroundColourId, p.surface);
+    setColour (juce::AlertWindow::textColourId, p.text);
+    setColour (juce::AlertWindow::outlineColourId, p.border);
+    setColour (juce::TextEditor::backgroundColourId, p.elevated);
+    setColour (juce::TextEditor::textColourId, p.text);
+    setColour (juce::TextEditor::outlineColourId, p.border);
+    setColour (juce::TextEditor::focusedOutlineColourId, p.accent);
+    setColour (juce::TextButton::buttonColourId, p.elevated);
+    setColour (juce::TextButton::textColourOffId, p.text);
+}
+
+void SnaplineLookAndFeel::drawCornerResizer (juce::Graphics& g, int width, int height, bool isMouseOver, bool isMouseDragging)
+{
+    g.setColour (isMouseOver || isMouseDragging ? colours.muted : colours.faint);
+    const auto w = (float) width, h = (float) height;
+    for (float inset : { 5.0f, 9.0f })
+        g.drawLine (w - inset, h - 2.0f, w - 2.0f, h - inset, 1.5f);
 }
 
 void SnaplineLookAndFeel::drawLinearSlider (juce::Graphics& g, int x, int y, int width, int height, float sliderPos,
@@ -190,6 +208,13 @@ void Segmented::paint (juce::Graphics& g)
     }
 }
 
+bool Segmented::keyPressed (const juce::KeyPress& key)
+{
+    if (key == juce::KeyPress::leftKey && selected > 0) { setSelected (selected - 1, true); return true; }
+    if (key == juce::KeyPress::rightKey && selected < labels.size() - 1) { setSelected (selected + 1, true); return true; }
+    return false;
+}
+
 void Segmented::mouseDown (const juce::MouseEvent& e)
 {
     const int index = (int) ((float) e.x / ((float) getWidth() / (float) labels.size()));
@@ -205,6 +230,8 @@ ParameterRow::ParameterRow (juce::AudioProcessorValueTreeState& state, const juc
     slider.setTextBoxStyle (juce::Slider::NoTextBox, true, 0, 0);
     slider.setScrollWheelEnabled (false);
     slider.setTooltip (tooltip);
+    slider.setTitle (name);
+    slider.setDescription (tooltip);
     if (auto* parameter = state.getParameter (parameterId))
         slider.setDoubleClickReturnValue (true, parameter->convertFrom0to1 (parameter->getDefaultValue()));
     slider.onValueChange = [this] { repaint(); };
@@ -342,29 +369,41 @@ SnaplineAudioProcessorEditor::SnaplineAudioProcessorEditor (SnaplineAudioProcess
       output (p.parameters, "output", "Output", "Output level."),
       reference (p.parameters, "reference", "A4 tuning", "Reference pitch for A4. Use it when the track isn't tuned to 440 Hz.")
 {
+    const float initialScale = juce::jlimit (0.75f, 1.5f, audioProcessor.editorScale); // resized() overwrites it while we set up
     colours = audioProcessor.theme == "light" ? snapline::theme::lightPalette() : snapline::theme::darkPalette();
     lookAndFeel.setPalette (colours);
     setLookAndFeel (&lookAndFeel);
-    setSize (editorWidth, editorHeight);
+    addAndMakeVisible (holder);
+    holder.setInterceptsMouseClicks (false, true);
 
-    for (int i = 0; i < SnaplineAudioProcessor::numPresets; ++i)
-        preset.addItem (snapline::factoryPresets[(size_t) i].name, i + 1);
     preset.setTextWhenNothingSelected ("Custom");
     preset.onChange = [this]
     {
-        if (preset.getSelectedId() > 0)
-            audioProcessor.setCurrentProgram (preset.getSelectedId() - 1);
+        const int id = preset.getSelectedId();
+        if (id >= 1 && id <= SnaplineAudioProcessor::numPresets)
+            audioProcessor.setCurrentProgram (id - 1);
+        else if (id >= userPresetBase && id - userPresetBase < userPresetNames.size())
+            audioProcessor.loadUserPreset (userPresetNames[id - userPresetBase]);
+        else if (id == savePresetId)
+            promptSavePreset();
+        else if (id == showFolderId)
+        {
+            const auto folder = audioProcessor.getUserPresetDirectory();
+            folder.createDirectory();
+            folder.revealToUser();
+        }
     };
-    configureCombo (preset, "Load a correction style. Key, scale and input settings stay as they are.");
+    configureCombo (preset, "Preset", "Load a correction style, or save your own. Key, scale and input settings stay as they are.");
+    rebuildPresetMenu();
 
     for (auto* name : snapline::noteNames) key.addItem (name, key.getNumItems() + 1);
     for (const auto& s : snapline::scales) scale.addItem (s.name, scale.getNumItems() + 1);
     inputType.addItemList ({ "Soprano", "Alto / Tenor", "Low Male", "Instrument" }, 1);
     midiMode.addItemList ({ "Off", "Snap to held notes", "Force to held note" }, 1);
-    configureCombo (key, "The song's key.");
-    configureCombo (scale, "Notes the vocal is tuned to. Chromatic allows every note; Custom uses the keys you pick below.");
-    configureCombo (inputType, "The voice's range. It sets where pitch is searched for, which avoids octave mistakes.");
-    configureCombo (midiMode, "Use MIDI from the track: snap to the notes you hold, or force the vocal to the note you hold.");
+    configureCombo (key, "Key", "The song's key.");
+    configureCombo (scale, "Scale", "Notes the vocal is tuned to. Chromatic allows every note; Custom uses the keys you pick below.");
+    configureCombo (inputType, "Input type", "The voice's range. It sets where pitch is searched for, which avoids octave mistakes.");
+    configureCombo (midiMode, "MIDI notes", "Use MIDI from the track: snap to the notes you hold, or force the vocal to the note you hold.");
 
     auto& state = audioProcessor.parameters;
     keyAttachment = std::make_unique<ComboAttachment> (state, "key", key);
@@ -373,10 +412,14 @@ SnaplineAudioProcessorEditor::SnaplineAudioProcessorEditor (SnaplineAudioProcess
     midiModeAttachment = std::make_unique<ComboAttachment> (state, "midiMode", midiMode);
 
     noteStrip.onToggle = [this] (int pc) { audioProcessor.toggleNote (pc); };
-    addAndMakeVisible (noteStrip);
+    noteStrip.setTitle ("Target notes");
+    noteStrip.setDescription (noteStrip.getTooltip());
+    holder.addAndMakeVisible (noteStrip);
 
     graph.setFrameRate (audioProcessor.getDisplayFrameRate());
-    addAndMakeVisible (graph);
+    graph.setTitle ("Pitch display");
+    graph.setDescription ("Sung and corrected pitch over the last five seconds, with the target notes highlighted.");
+    holder.addAndMakeVisible (graph);
 
     modeSwitch.setTooltip ("Studio: highest quality with a fixed 100 ms delay your DAW compensates for. "
                            "Live: low delay for monitoring while you record.");
@@ -389,7 +432,10 @@ SnaplineAudioProcessorEditor::SnaplineAudioProcessorEditor (SnaplineAudioProcess
         modeSwitch.onChange = [this] (int i) { modeAttachment->setValueAsCompleteGesture ((float) i); };
         modeAttachment->sendInitialUpdate();
     }
-    addAndMakeVisible (modeSwitch);
+    modeSwitch.setTitle ("Mode");
+    modeSwitch.setDescription (modeSwitch.getTooltip());
+    modeSwitch.setWantsKeyboardFocus (true);
+    holder.addAndMakeVisible (modeSwitch);
 
     themeSwitch.setSelected (audioProcessor.theme == "light" ? 1 : 0, false);
     themeSwitch.setTooltip ("Appearance");
@@ -398,17 +444,34 @@ SnaplineAudioProcessorEditor::SnaplineAudioProcessorEditor (SnaplineAudioProcess
         audioProcessor.theme = i == 1 ? "light" : "dark";
         applyTheme();
     };
-    addAndMakeVisible (themeSwitch);
+    themeSwitch.setTitle ("Appearance");
+    themeSwitch.setDescription ("Switch between the dark and the light theme.");
+    themeSwitch.setWantsKeyboardFocus (true);
+    holder.addAndMakeVisible (themeSwitch);
 
     preserveFormants.setTooltip ("Keeps the voice's natural character when the pitch moves. Turn off for a more synthetic, chipmunk-style shift.");
     preserveAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (state, "preserveFormants", preserveFormants);
-    addAndMakeVisible (preserveFormants);
+    preserveFormants.setTitle ("Preserve formants");
+    preserveFormants.setDescription (preserveFormants.getTooltip());
+    holder.addAndMakeVisible (preserveFormants);
+
+    bypass.setTooltip ("Soft bypass: fades to the original vocal, delayed by the same amount, so timing never shifts.");
+    bypass.setTitle ("Bypass");
+    bypass.setDescription (bypass.getTooltip());
+    bypassAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (state, "bypass", bypass);
+    holder.addAndMakeVisible (bypass);
 
     for (auto* row : { &retune, &humanize, &tolerance, &amount, &vibratoDepth, &vibratoRate, &vibratoOnset, &naturalVibrato,
                        &formantShift, &throat, &transpose, &mix, &output, &reference })
-        addAndMakeVisible (row);
+        holder.addAndMakeVisible (row);
 
     applyTheme();
+
+    // Resizable from 75 to 150 %, keeping the aspect ratio; the size is part of the session.
+    setResizeLimits (editorWidth * 3 / 4, editorHeight * 3 / 4, editorWidth * 3 / 2, editorHeight * 3 / 2);
+    getConstrainer()->setFixedAspectRatio ((double) editorWidth / (double) editorHeight);
+    setResizable (true, true);
+    setSize (juce::roundToInt ((float) editorWidth * initialScale), juce::roundToInt ((float) editorHeight * initialScale));
     startTimerHz (30);
 }
 
@@ -418,11 +481,49 @@ SnaplineAudioProcessorEditor::~SnaplineAudioProcessorEditor()
     setLookAndFeel (nullptr);
 }
 
-void SnaplineAudioProcessorEditor::configureCombo (juce::ComboBox& box, const juce::String& tooltip)
+void SnaplineAudioProcessorEditor::configureCombo (juce::ComboBox& box, const juce::String& title, const juce::String& tooltip)
 {
     box.setJustificationType (juce::Justification::centredLeft);
     box.setTooltip (tooltip);
-    addAndMakeVisible (box);
+    box.setTitle (title);
+    box.setDescription (tooltip);
+    holder.addAndMakeVisible (box);
+}
+
+juce::Rectangle<int> SnaplineAudioProcessorEditor::toEditor (juce::Rectangle<int> r) const
+{
+    return r.toFloat().transformedBy (juce::AffineTransform::scale (uiScale())).getSmallestIntegerContainer();
+}
+
+void SnaplineAudioProcessorEditor::rebuildPresetMenu()
+{
+    userPresetNames = audioProcessor.listUserPresets();
+    preset.clear (juce::dontSendNotification);
+    for (int i = 0; i < SnaplineAudioProcessor::numPresets; ++i)
+        preset.addItem (snapline::factoryPresets[(size_t) i].name, i + 1);
+    if (! userPresetNames.isEmpty())
+    {
+        preset.addSeparator();
+        for (int i = 0; i < userPresetNames.size(); ++i)
+            preset.addItem (userPresetNames[i], userPresetBase + i);
+    }
+    preset.addSeparator();
+    preset.addItem ("Save preset...", savePresetId);
+    preset.addItem ("Show presets folder", showFolderId);
+}
+
+void SnaplineAudioProcessorEditor::promptSavePreset()
+{
+    auto* window = new juce::AlertWindow ("Save preset", "Name this correction style. Key, scale, input type, mix and output are not saved.",
+                                          juce::MessageBoxIconType::NoIcon, this);
+    window->addTextEditor ("name", audioProcessor.getUserPresetName(), "Name");
+    window->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    window->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    window->enterModalState (true, juce::ModalCallbackFunction::create ([safe = juce::Component::SafePointer<SnaplineAudioProcessorEditor> (this), window] (int result)
+    {
+        if (result == 1 && safe != nullptr && safe->audioProcessor.saveUserPreset (window->getTextEditorContents ("name")))
+            safe->rebuildPresetMenu();
+    }), true);
 }
 
 void SnaplineAudioProcessorEditor::applyTheme()
@@ -531,10 +632,11 @@ void SnaplineAudioProcessorEditor::paintHeader (juce::Graphics& g)
 void SnaplineAudioProcessorEditor::paint (juce::Graphics& g)
 {
     g.fillAll (colours.background);
+    g.addTransform (juce::AffineTransform::scale (uiScale())); // everything below is laid out at 1080 x 760
     g.setColour (colours.sidebar);
     g.fillRect (sidebar);
     g.setColour (colours.border);
-    g.drawVerticalLine (sidebar.getRight() - 1, 0.0f, (float) getHeight());
+    g.drawVerticalLine (sidebar.getRight() - 1, 0.0f, (float) editorHeight);
 
     paintWordmark (g, { 22.0f, 24.0f });
 
@@ -553,7 +655,7 @@ void SnaplineAudioProcessorEditor::paint (juce::Graphics& g)
     g.setColour (colours.faint);
     g.setFont (uiFont (11.5f));
     g.drawFittedText ("Pitch tracking and correction run locally, in real time.",
-                      juce::Rectangle<int> (22, getHeight() - 52, sidebar.getWidth() - 44, 34), juce::Justification::topLeft, 2);
+                      juce::Rectangle<int> (22, editorHeight - 52, sidebar.getWidth() - 44, 34), juce::Justification::topLeft, 2);
 
     paintHeader (g);
     paintCard (g, cards[0], "Correction");
@@ -564,7 +666,11 @@ void SnaplineAudioProcessorEditor::paint (juce::Graphics& g)
 
 void SnaplineAudioProcessorEditor::resized()
 {
-    sidebar = { 0, 0, sidebarWidth, getHeight() };
+    holder.setTransform (juce::AffineTransform::scale (uiScale()));
+    holder.setBounds (0, 0, editorWidth, editorHeight);
+    if (getWidth() > 0)
+        audioProcessor.editorScale = juce::jlimit (0.75f, 1.5f, uiScale());
+    sidebar = { 0, 0, sidebarWidth, editorHeight };
     const int sx = 20, sw = sidebarWidth - 40;
     preset.setBounds (sx, 92, sw, 30);
     key.setBounds (sx, 156, 72, 30);
@@ -572,9 +678,10 @@ void SnaplineAudioProcessorEditor::resized()
     noteStrip.setBounds (sx, 220, sw, 84);
     inputType.setBounds (sx, 340, sw, 30);
     midiMode.setBounds (sx, 404, sw, 30);
-    themeSwitch.setBounds (sx, getHeight() - 100, sw, 30);
+    bypass.setBounds (sx, 466, sw, 28);
+    themeSwitch.setBounds (sx, editorHeight - 100, sw, 30);
 
-    const int mx = sidebarWidth + 28, mw = getWidth() - mx - 28;
+    const int mx = sidebarWidth + 28, mw = editorWidth - mx - 28;
     header = { mx, 20, mw - 200, 66 };
     modeSwitch.setBounds (mx + mw - 180, 24, 180, 32);
     graph.setBounds (mx, 100, mw, 300);
@@ -620,14 +727,22 @@ void SnaplineAudioProcessorEditor::timerCallback()
         currentPitchClass = lastTarget >= 0 ? lastTarget % 12 : -1;
     noteStrip.setState (active, audioProcessor.getHeldMidiNotes(), currentPitchClass);
 
-    const int selected = audioProcessor.presetModified.load() ? 0 : audioProcessor.getCurrentProgram() + 1;
+    const auto userName = audioProcessor.getUserPresetName();
+    int selected = 0;
+    if (! audioProcessor.presetModified.load())
+    {
+        const int userIndex = userName.isNotEmpty() ? userPresetNames.indexOf (userName) : -1;
+        selected = userName.isEmpty() ? audioProcessor.getCurrentProgram() + 1 : (userIndex >= 0 ? userPresetBase + userIndex : 0);
+    }
     if (preset.getSelectedId() != selected)
         preset.setSelectedId (selected, juce::dontSendNotification);
 
     // Header text
-    const auto title = selected > 0 ? juce::String (snapline::factoryPresets[(size_t) selected - 1].name) : juce::String ("Custom");
-    const auto subtitle = selected > 0 ? juce::String (snapline::factoryPresets[(size_t) selected - 1].description)
-                                       : juce::String ("Your own correction settings");
+    const bool isUser = selected >= userPresetBase;
+    const auto title = isUser ? userName : selected > 0 ? juce::String (snapline::factoryPresets[(size_t) selected - 1].name) : juce::String ("Custom");
+    const auto subtitle = isUser ? juce::String ("Your saved preset")
+                                 : selected > 0 ? juce::String (snapline::factoryPresets[(size_t) selected - 1].description)
+                                                : juce::String ("Your own correction settings");
     const bool studio = modeSwitch.getSelected() == 1;
     const float delay = audioProcessor.getEffectiveDelayMs();
     if (std::abs (delay - displayedDelayMs) > 0.75f)
@@ -640,5 +755,5 @@ void SnaplineAudioProcessorEditor::timerCallback()
         headerSubtitle = subtitle;
         chips = nextChips;
     }
-    repaint (header.getUnion ({ modeSwitch.getX(), modeSwitch.getBottom(), modeSwitch.getWidth(), 24 }));
+    repaint (toEditor (header.getUnion ({ modeSwitch.getX(), modeSwitch.getBottom(), modeSwitch.getWidth(), 24 })));
 }
