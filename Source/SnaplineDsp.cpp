@@ -1,8 +1,10 @@
 #include "SnaplineDsp.h"
 #include "PitchDetector.h"
+#include "LpcEnvelope.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace snapline
@@ -31,10 +33,16 @@ constexpr float gateRms = 0.001f;         // -60 dBFS
 constexpr float relativeGate = 0.08f;     // -22 dB below the recent vocal level
 constexpr double holdSeconds = 0.03;      // bridge short detection dropouts inside a note
 constexpr float centreHz = 3.0f;          // cut-off of the slow pitch centre
-constexpr float maxDeviation = 60.0f;     // cents the pitch may stray from its centre before it drags it along
+constexpr float maxDeviation = 60.0f;
+constexpr float springTimeScale = 2.146f; // w t at which a critically damped step response reaches 63 %     // cents the pitch may stray from its centre before it drags it along
 constexpr int markCapacity = 8192;
 constexpr int frameCapacity = 4096;
 constexpr int displayCapacity = 4096;
+
+constexpr double lpcMaxSeconds = 0.032;     // longest LPC analysis window (low voices)
+constexpr double lpcMinSeconds = 0.010;     // shortest (high voices); two periods of the lowest pitch in between
+constexpr int lpcGridShift = 3;             // lattice coefficients are interpolated every 8 samples
+constexpr int lpcFrameStride = 2;           // one LPC frame every 2 analysis hops (5.3 ms): formants move over 30-100 ms
 
 constexpr int hannTableSize = 1024;
 constexpr int silenceBlockShift = 5;       // 32-sample blocks flagged as digitally silent
@@ -132,7 +140,8 @@ struct SnaplineDsp::Impl
     // Correction state
     int currentNote = -1;
     double noteAge = 0.0;
-    float correction = 0.0f;
+    float correction = 0.0f;              // output of the retune spring (cents)
+    float correctionPull = 0.0f;          // its first stage: the spring's anchor position
     double vibratoPhase = 0.0;
     float centreA = 0.0f, centreB = 0.0f; // two cascaded 3 Hz poles: the singer's slow pitch centre (cents)
     bool centreValid = false;
@@ -142,6 +151,33 @@ struct SnaplineDsp::Impl
 
     juce::AbstractFifo displayFifo { displayCapacity };
     std::array<DisplayFrame, displayCapacity> displayFrames {};
+
+    // LPC formant methods (all buffers allocated in prepare, used only when the method is not classic)
+    struct LpcFrame
+    {
+        std::int64_t time = 0;                   // input time this envelope belongs to (interpolation knot)
+        float error = 0.0f;                      // prediction error power E (0 = silent frame)
+        std::array<float, maxLpcOrder> k {};     // reflection coefficients of A(z)
+        std::array<float, maxLpcOrder> kWarp {}; // the same envelope moved by warpPhi (computed lazily)
+        float warpGain = 1.0f;
+        double warpPhi = 0.0;                    // 0 = kWarp not computed yet
+    };
+    FormantMethod method = FormantMethod::classic;
+    LpcAnalyzer lpc;
+    int lpcOrder = 16, lpcMaxWindow = 0;
+    std::vector<LpcFrame> lpcFrames;
+    std::int64_t lpcCount = 0;
+    std::vector<float> resL, resR;               // source-filter: LPC residual (excitation) per channel
+    std::vector<float> delayAcc;                 // window-weighted source delay of the grains at each output sample
+    std::int64_t residualPos = 0;                // residual is known for input times below this
+    LatticeInverse inputInvL, inputInvR, outInvL, outInvR;
+    LatticeSynthesis outSynL, outSynR;
+    std::array<float, maxLpcOrder> kIn {}, kSrcOut {}, kWarpOut {};
+    float gainOut = 1.0f;
+    bool envelopeFilterOn = false, lastWetHeard = true;
+    bool lpcAnalysing = false;                   // source-filter always; envelope only while something moves
+    float lpcLevel = 0.0f;                       // recent peak of the LPC frame energy (decays over ~1 s)
+    float guardWet = 0.0f, guardDry = 0.0f;      // re-colouring guard: short-term power of the output and of its source
 
     const SnaplineParams* params = nullptr;
     std::atomic<float> effectiveDelay { 0.0f };
@@ -163,6 +199,15 @@ struct SnaplineDsp::Impl
         marks.assign ((size_t) markCapacity, {});
         frames.assign ((size_t) frameCapacity, {});
         lpCoeff = (float) (1.0 - std::exp (-twoPi * 900.0 / fs));
+        lpcMaxWindow = (int) std::ceil (lpcMaxSeconds * fs) + 2;
+        lpc.prepare (fs, lpcMaxWindow);
+        lpcOrder = lpc.order();
+        lpcFrames.assign ((size_t) frameCapacity, {});
+        resL.assign ((size_t) ringSize, 0.0f);
+        resR.assign ((size_t) ringSize, 0.0f);
+        delayAcc.assign ((size_t) ringSize, 0.0f);
+        if ((int) scratch.size() < lpcMaxWindow)
+            scratch.assign ((size_t) lpcMaxWindow, 0.0f);
         mode = initialMode;
         reset();
     }
@@ -190,6 +235,7 @@ struct SnaplineDsp::Impl
         currentNote = -1;
         noteAge = 0.0;
         correction = 0.0f;
+        correctionPull = 0.0f;
         vibratoPhase = 0.0;
         centreA = centreB = 0.0f;
         centreValid = false;
@@ -198,8 +244,194 @@ struct SnaplineDsp::Impl
         synthPos = (double) latency;
         extraDelay = 0.0;
         delayFloor = 0.0;
+        std::fill (resL.begin(), resL.end(), 0.0f);
+        std::fill (resR.begin(), resR.end(), 0.0f);
+        std::fill (delayAcc.begin(), delayAcc.end(), 0.0f);
+        lpcCount = 0;
+        lpcLevel = 0.0f;
+        guardWet = guardDry = 0.0f;
+        residualPos = now;
+        resetLattices();
         displayFifo.reset();
     }
+
+    void resetLattices()
+    {
+        for (auto* l : { &inputInvL, &inputInvR, &outInvL, &outInvR })
+            l->reset();
+        outSynL.reset();
+        outSynR.reset();
+    }
+
+    // ------------------------------------------------------------------ LPC envelope
+    LpcFrame& lpcFrame (std::int64_t j) { return lpcFrames[(size_t) (j & (frameCapacity - 1))]; }
+    std::int64_t oldestLpc() const { return juce::jmax<std::int64_t> (0, lpcCount - frameCapacity + 4); }
+
+    int lpcWindowLength() const
+    {
+        const int twoPeriods = (int) std::ceil (2.0 * fs / range().minHz);
+        return juce::jlimit ((int) (lpcMinSeconds * fs), lpcMaxWindow - 2, twoPeriods);
+    }
+
+    /**
+        One LPC frame from the newest input. Its knot time is where it applies: in Studio the
+        window's centre (the look-ahead pays for it), in Live one hop ahead of now, so the input
+        can be inverse-filtered as soon as it arrives (the envelope estimate then lags by half a
+        window, about 8-16 ms, which formants, moving over 30-100 ms, barely notice).
+    */
+    void analyseLpc()
+    {
+        const int n = lpcWindowLength();
+        for (int i = 0; i < n; ++i)
+            scratch[(size_t) i] = sampleAt (input, now - n + i);
+        auto& f = lpcFrame (lpcCount);
+        const std::int64_t knot = mode == Mode::studio ? now - n / 2 : now + (std::int64_t) (lpcFrameStride * hop);
+        f.time = lpcCount > 0 ? juce::jmax (knot, lpcFrame (lpcCount - 1).time + 1) : knot;
+        float energy = 0.0f;
+        for (int i = 0; i < n; ++i)
+            energy += scratch[(size_t) i] * scratch[(size_t) i];
+        energy /= (float) n;
+        lpcLevel = juce::jmax (energy, lpcLevel * std::exp (-(float) (lpcFrameStride * hop) / (float) fs));
+        // Quiet frames (pauses, more than 40 dB under the recent voice) keep the last real envelope
+        // instead of fitting the noise floor. The vocal tract does not vanish between notes, and an
+        // onset is then whitened and re-coloured with similar resonances on both sides of the
+        // grains that straddle it (a near-flat envelope against a sharp one made bursts there).
+        if (energy < 1.0e-4f * lpcLevel && lpcCount > 0)
+        {
+            const auto& previous = lpcFrame (lpcCount - 1);
+            f.k = previous.k;
+            f.error = previous.error;
+        }
+        else
+            lpc.analyse (scratch.data(), n, f.k.data(), f.error);
+        f.warpPhi = 0.0;
+        ++lpcCount;
+    }
+
+    /**
+        Start the LPC history again (method or mode change). The first frame is analysed at once
+        and the residual is rebuilt for the audio the grains may still read, all with that frame;
+        times before the first knot use it on both sides (whitening and re-colouring), so the
+        pair stays an exact inverse.
+    */
+    void restartLpc()
+    {
+        lpcCount = 0;
+        resetLattices();
+        envelopeFilterOn = false;
+        lpcAnalysing = method == FormantMethod::lpcSourceFilter || (method == FormantMethod::lpcEnvelope && envelopeMoves (*params));
+        if (! lpcAnalysing)
+            return;
+        analyseLpc();
+        const auto backfill = (std::int64_t) latency + 4 * (std::int64_t) maxWindow + (std::int64_t) (0.05 * fs);
+        residualPos = juce::jmax<std::int64_t> (0, now - backfill);
+    }
+
+    static bool envelopeMoves (const SnaplineParams& p)
+    {
+        return p.formantShift != 0.0f || p.throat != 100.0f || ! p.preserveFormants;
+    }
+
+    /** Frames around time t and the interpolation weight between them; false when there are none. */
+    bool lpcBracket (std::int64_t t, std::int64_t& j0, std::int64_t& j1, float& w)
+    {
+        if (lpcCount == 0)
+            return false;
+        std::int64_t lo = oldestLpc(), hi = lpcCount - 1;
+        w = 0.0f;
+        if (t <= lpcFrame (lo).time) { j0 = j1 = lo; return true; }
+        if (t >= lpcFrame (hi).time) { j0 = j1 = hi; return true; }
+        while (hi - lo > 1)
+        {
+            const auto mid = (lo + hi) / 2;
+            (lpcFrame (mid).time <= t ? lo : hi) = mid;
+        }
+        j0 = lo;
+        j1 = hi;
+        w = (float) (t - lpcFrame (lo).time) / (float) juce::jmax<std::int64_t> (1, lpcFrame (hi).time - lpcFrame (lo).time);
+        return true;
+    }
+
+    /** Source envelope at t (reflection coefficients, linearly interpolated between knots). */
+    void sourceCoefficients (std::int64_t t, float* k)
+    {
+        std::int64_t j0, j1;
+        float w;
+        if (! lpcBracket (t, j0, j1, w))
+        {
+            std::fill (k, k + lpcOrder, 0.0f);
+            return;
+        }
+        const auto& a = lpcFrame (j0).k;
+        const auto& b = lpcFrame (j1).k;
+        for (int m = 0; m < lpcOrder; ++m)
+            k[m] = a[(size_t) m] + w * (b[(size_t) m] - a[(size_t) m]);
+    }
+
+    /** How far the envelope moves for the frame at time t: Formant and Throat, plus the pitch ratio when formants are not preserved. */
+    double envelopeFactor (std::int64_t t)
+    {
+        const auto& p = *params;
+        double phi = std::exp2 ((double) p.formantShift / 12.0) * (100.0 / juce::jlimit (50.0, 200.0, (double) p.throat));
+        if (! p.preserveFormants)
+            phi *= std::exp2 ((double) juce::jlimit (-2400.0f, 2400.0f, shiftAt (t)) / 1200.0);
+        return juce::jlimit (0.5, 2.0, phi);
+    }
+
+    void ensureWarp (LpcFrame& f)
+    {
+        const double phi = envelopeFactor (f.time);
+        if (std::abs (f.warpPhi - phi) > 1.0e-4)
+        {
+            lpc.warp (f.k.data(), f.error, phi, f.kWarp.data(), f.warpGain);
+            f.warpPhi = phi;
+        }
+    }
+
+    /** Target (warped) envelope at t and its level correction. */
+    void targetCoefficients (std::int64_t t, float* k, float& gain)
+    {
+        std::int64_t j0, j1;
+        float w;
+        if (! lpcBracket (t, j0, j1, w))
+        {
+            std::fill (k, k + lpcOrder, 0.0f);
+            gain = 1.0f;
+            return;
+        }
+        auto& a = lpcFrame (j0);
+        auto& b = lpcFrame (j1);
+        ensureWarp (a);
+        if (j1 != j0)
+            ensureWarp (b);
+        for (int m = 0; m < lpcOrder; ++m)
+            k[m] = a.kWarp[(size_t) m] + w * (b.kWarp[(size_t) m] - a.kWarp[(size_t) m]);
+        gain = a.warpGain + w * (b.warpGain - a.warpGain);
+    }
+
+    /**
+        Source-filter: inverse-filter the new input, e[t] = A_t(z) x[t], for every time whose
+        envelope is final (below the newest knot). The coefficients are a pure function of the
+        8-sample grid time, so the re-colouring filter later sees exactly the same A_t.
+    */
+    void advanceResidual()
+    {
+        if (lpcCount == 0)
+            return;
+        const auto limit = juce::jmin (now, lpcFrame (lpcCount - 1).time);
+        constexpr std::int64_t gridMask = (1 << lpcGridShift) - 1;
+        for (auto t = residualPos; t < limit; ++t)
+        {
+            if ((t & gridMask) == 0 || t == residualPos)
+                sourceCoefficients (t & ~gridMask, kIn.data());
+            const auto idx = (size_t) (t & ringMask);
+            resL[idx] = inputInvL.process (dryL[idx], kIn.data(), lpcOrder);
+            if (stereo)
+                resR[idx] = inputInvR.process (dryR[idx], kIn.data(), lpcOrder);
+        }
+        residualPos = juce::jmax (residualPos, limit);
+    }
+
 
     int latencyFor (Mode m) const
     {
@@ -257,7 +489,8 @@ struct SnaplineDsp::Impl
             for (int i = 0; i < 2 * window; ++i)
                 scratch[(size_t) i] = input[(size_t) ((start + i) & ringMask)];
             res = detector.detect (scratch.data(), window, minLag, yinThreshold,
-                                   juce::jmax (gateRms, levelEnvelope * decay * relativeGate));
+                                   juce::jmax (gateRms, levelEnvelope * decay * relativeGate),
+                                   trackerVoiced ? lastVoicedHz : 0.0f);
         }
 
         const bool inRange = res.hz >= r.minHz * 0.9f && res.hz <= r.maxHz * 1.1f;
@@ -329,6 +562,9 @@ struct SnaplineDsp::Impl
 
         while (correctedCount < frameCount - lookahead)
             decideCorrection (correctedCount++);
+
+        if (lpcAnalysing && (frameCount % lpcFrameStride) == 0)
+            analyseLpc();
     }
 
     float markPeriod() const
@@ -493,7 +729,9 @@ struct SnaplineDsp::Impl
 
         if (! f.voiced)
         {
-            correction += (0.0f - correction) * (1.0f - std::exp (-dt / 0.05f));
+            const float release = 1.0f - std::exp (-dt / 0.05f);
+            correctionPull += (0.0f - correctionPull) * release;
+            correction += (0.0f - correction) * release;
             currentNote = -1;
             noteAge = 0.0;
             centreValid = false;
@@ -592,12 +830,26 @@ struct SnaplineDsp::Impl
         float tau = p.retuneMs * 0.001f;
         if (p.humanize > 0.0f)
             tau += p.humanize * 0.01f * 0.25f * smoothstep (0.12f, 0.52f, (float) noteAge);
-        const float alpha = tau <= 0.0005f ? 1.0f : 1.0f - std::exp (-dt / tau);
-        correction += (desired - correction) * alpha;
+        // Retune spring. Two identical one-pole stages in series are exactly a critically damped
+        // spring-mass-damper, x'' + 2w x' + w^2 x = w^2 u: the fastest second-order response that
+        // never rings. Unlike a single pole it starts with zero slope, so the correction eases in
+        // instead of kinking at every new target (that kink is the audible "step" of a hard
+        // one-pole retune). Its step response is 1 - (1 + w t) e^(-w t), which reaches 63 % at
+        // w t = 2.146; each stage gets tau / 2.146, so Retune speed keeps its meaning (63 % of the
+        // way in `retuneMs`). 0 ms stays an instant snap.
+        const float stageTau = tau / springTimeScale;
+        const float alpha = stageTau <= 0.0005f ? 1.0f : 1.0f - std::exp (-dt / stageTau);
+        correctionPull += (desired - correctionPull) * alpha;
+        correction += (correctionPull - correction) * alpha;
         // Never correct past the note: a slow correction that built up while the singer was
         // rising on their own (a scoop) is released as soon as they arrive.
-        if ((fullError > 0.0f && correction > fullError) || (fullError < 0.0f && correction < fullError))
-            correction = fullError;
+        const auto clampToError = [fullError] (float& v)
+        {
+            if ((fullError > 0.0f && v > fullError) || (fullError < 0.0f && v < fullError))
+                v = fullError;
+        };
+        clampToError (correctionPull);
+        clampToError (correction);
         const float correctionOnly = correction * p.amount * 0.01f;
         const float applied = correctionOnly + p.naturalVibrato * 0.01f * deviation * p.amount * 0.01f;
 
@@ -701,14 +953,18 @@ struct SnaplineDsp::Impl
         const float shift = m.voiced ? juce::jlimit (-2400.0f, 2400.0f, shiftAt (m.pos)) * edgeFade (j, g.right) : 0.0f;
         g.ratio = std::exp2 ((double) shift / 1200.0);
         const double character = std::exp2 ((double) p.formantShift / 12.0) * (100.0 / juce::jlimit (50.0, 200.0, (double) p.throat));
-        g.formant = juce::jlimit (0.5, 2.0, (p.preserveFormants ? 1.0 : g.ratio) * character);
+        // The LPC methods never resample grains: PSOLA keeps the envelope, and any envelope move is
+        // done by the LPC filters on the output.
+        g.formant = method != FormantMethod::classic ? 1.0
+                                                     : juce::jlimit (0.5, 2.0, (p.preserveFormants ? 1.0 : g.ratio) * character);
         g.sourceReach = g.right * juce::jmax (1.0, g.formant);
         return g;
     }
 
     bool sourceAvailable (std::int64_t j, const Grain& g) const
     {
-        return j + 1 < markCount && (double) g.centre + g.sourceReach + 3.0 < (double) now;
+        const auto known = method == FormantMethod::lpcSourceFilter ? residualPos : now;
+        return j + 1 < markCount && (double) g.centre + g.sourceReach + 3.0 < (double) known;
     }
 
     /** True when every input sample in [lo, hi] is known to be digitally silent. */
@@ -740,6 +996,11 @@ struct SnaplineDsp::Impl
 
         const auto& table = hannTable();
         const int channels = stereo ? 2 : 1;
+        // The LPC re-colouring must use the envelope of the input this output sample was cut from.
+        // With unresampled grains that is a constant delay per grain; the weighted mean over the
+        // overlapping grains follows Live catch-ups and PSOLA's repeated or skipped periods exactly.
+        const bool trackDelay = method != FormantMethod::classic;
+        const float grainDelay = (float) (centre - (double) g.centre);
         const bool fixedPhase = g.formant == 1.0; // the read offset is the same for every sample
         float h0 = 0, h1 = 0, h2 = 0, h3 = 0;
         std::int64_t base0 = 0;
@@ -769,7 +1030,8 @@ struct SnaplineDsp::Impl
             // (level, phase and timing differences between the channels) is kept.
             for (int ch = 0; ch < channels; ++ch)
             {
-                const auto& ring = ch == 0 ? dryL : dryR;
+                const bool residual = method == FormantMethod::lpcSourceFilter;
+                const auto& ring = ch == 0 ? (residual ? resL : dryL) : (residual ? resR : dryR);
                 float sample;
                 if (fixedPhase)
                 {
@@ -782,6 +1044,8 @@ struct SnaplineDsp::Impl
                 (ch == 0 ? accL : accR)[(size_t) (i & ringMask)] += w * sample;
             }
             win[(size_t) (i & ringMask)] += w;
+            if (trackDelay)
+                delayAcc[(size_t) (i & ringMask)] += w * grainDelay;
         }
     }
 
@@ -822,7 +1086,8 @@ struct SnaplineDsp::Impl
                 // position is inaudible, and never below what this voice has needed lately.
                 // Doing it during a note stretches the audio (a steady detune of several cents)
                 // and was the main source of Live-mode damage.
-                const double headroom = (double) now - ((double) g.centre + g.sourceReach);
+                const double known = (double) (method == FormantMethod::lpcSourceFilter ? residualPos : now);
+                const double headroom = known - ((double) g.centre + g.sourceReach);
                 if (headroom > 2.5 * g.right)
                     extraDelay = juce::jmax (delayFloor, extraDelay - 0.25 * g.right);
             }
@@ -838,11 +1103,21 @@ struct SnaplineDsp::Impl
     {
         params = &p;
         stereo = inR != nullptr;
-        if (p.mode != mode)
+        // The envelope method analyses only while the envelope is meant to move; starting it again
+        // when a control moves is a method change as far as the LPC history is concerned.
+        const bool envelopeStarts = p.formantMethod == FormantMethod::lpcEnvelope && method == p.formantMethod
+                                    && envelopeMoves (p) != lpcAnalysing;
+        if (p.mode != mode || p.formantMethod != method || envelopeStarts)
         {
-            applyMode (p.mode);
-            extraDelay = 0.0;
-            delayFloor = 0.0;
+            const bool modeChanged = p.mode != mode;
+            method = p.formantMethod;
+            if (modeChanged)
+            {
+                applyMode (p.mode);
+                extraDelay = 0.0;
+                delayFloor = 0.0;
+            }
+            restartLpc();
         }
 
         const std::int64_t blockStart = now;
@@ -872,11 +1147,27 @@ struct SnaplineDsp::Impl
             }
         }
         placeMarks();
+        if (method == FormantMethod::lpcSourceFilter)
+            advanceResidual();
         // Mix at zero or bypass engaged (and settled): the wet signal is not heard, so skip the resynthesis.
         // Tracking continues for the display; grains resume from the next block.
         const bool wetHeard = (p.mix > 0.0f || mixSmoothed > 1.0e-4f) && (! p.bypass || bypassSmoothed < 1.0f - 1.0e-4f);
         if (wetHeard)
             scheduleGrains (blockStart, now);
+
+        // LPC re-colouring of the wet signal. The envelope filter of the envelope method runs only
+        // while the envelope is meant to move; otherwise PSOLA alone already keeps it.
+        const bool wantEnvelope = method == FormantMethod::lpcEnvelope && envelopeMoves (p);
+        if (wantEnvelope != envelopeFilterOn || (wetHeard && ! lastWetHeard))
+        {
+            outInvL.reset(); outInvR.reset(); outSynL.reset(); outSynR.reset();
+        }
+        envelopeFilterOn = wantEnvelope;
+        lastWetHeard = wetHeard;
+        const bool recolour = wetHeard && (envelopeFilterOn || method == FormantMethod::lpcSourceFilter);
+        const float nominalDelay = (float) ((double) latency + extraDelay);
+        const float guardCoeff = 1.0f - std::exp (-1.0f / (0.003f * (float) fs));
+        std::int64_t coefficientGrid = std::numeric_limits<std::int64_t>::min();
         effectiveDelay.store ((float) (latency + extraDelay), std::memory_order_relaxed);
 
         const float mixTarget = juce::jlimit (0.0f, 1.0f, p.mix * 0.01f);
@@ -890,11 +1181,55 @@ struct SnaplineDsp::Impl
             const auto idx = (size_t) (o & ringMask);
             const float wsum = win[idx];
             const float norm = wsum > 0.0f ? 1.0f / juce::jmax (wsum, 0.5f) : 0.0f;
-            const float wetL = accL[idx] * norm;
-            const float wetR = stereo ? accR[idx] * norm : wetL;
+            float wetL = accL[idx] * norm;
+            float wetR = stereo ? accR[idx] * norm : wetL;
+            if (recolour)
+            {
+                // Output sample o carries the input from u = o - delay. Source-filter:
+                // y = g' e / A'_u. Envelope: y = g' (A_u y_psola) / A'_u, the PSOLA output whitened
+                // by its own envelope and re-coloured by the warped one.
+                const float d = wsum > 0.0f ? delayAcc[idx] / wsum : nominalDelay;
+                const auto u = o - (std::int64_t) std::lround (d);
+                constexpr std::int64_t gridMask = (1 << lpcGridShift) - 1;
+                const auto grid = u & ~gridMask;
+                if (grid != coefficientGrid)
+                {
+                    coefficientGrid = grid;
+                    if (envelopeFilterOn)
+                        sourceCoefficients (grid, kSrcOut.data());
+                    targetCoefficients (grid, kWarpOut.data(), gainOut);
+                }
+                if (envelopeFilterOn)
+                {
+                    wetL = outInvL.process (wetL, kSrcOut.data(), lpcOrder);
+                    if (stereo) wetR = outInvR.process (wetR, kSrcOut.data(), lpcOrder);
+                }
+                wetL = gainOut * outSynL.process (wetL, kWarpOut.data(), lpcOrder);
+                wetR = stereo ? gainOut * outSynR.process (wetR, kWarpOut.data(), lpcOrder) : wetL;
+
+                // Guard. Whitening and re-colouring are exact inverses only when a grain is re-coloured
+                // with the envelope it was whitened with. Where grains from both sides of a sudden
+                // envelope change overlap (the first onset after a stream starts, a voice entering from
+                // digital silence) a sharp resonance can briefly add gain. PSOLA keeps the short-term
+                // power of its source, so the output may not run more than 6 dB over the input it was
+                // cut from; one gain for both channels keeps the image. Inactive in normal operation.
+                const auto src = (size_t) (u & ringMask);
+                const float dryPower = u >= 0 ? juce::jmax (dryL[src] * dryL[src], dryR[src] * dryR[src]) : 0.0f;
+                const float wetPower = juce::jmax (wetL * wetL, wetR * wetR);
+                guardDry += guardCoeff * (dryPower - guardDry);
+                guardWet += guardCoeff * (wetPower - guardWet);
+                const float allowed = 4.0f * guardDry + 1.0e-12f;
+                if (guardWet > allowed)
+                {
+                    const float g = std::sqrt (allowed / guardWet);
+                    wetL *= g;
+                    wetR *= g;
+                }
+            }
             accL[idx] = 0.0f;
             accR[idx] = 0.0f;
             win[idx] = 0.0f;
+            delayAcc[idx] = 0.0f;
             const std::int64_t dryPos = o - latency;
             const float dl = dryPos >= 0 ? dryL[(size_t) (dryPos & ringMask)] : 0.0f;
             const float dr = dryPos >= 0 ? dryR[(size_t) (dryPos & ringMask)] : 0.0f;

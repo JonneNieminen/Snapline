@@ -4,9 +4,9 @@ This file is the shared source of project guidance for coding agents. Provider-s
 
 ## Project
 
-- JUCE 9.0.5+ and C++17 real-time vocal pitch correction plugin.
+- JUCE 9.0.5+ and C++20 real-time vocal pitch correction plugin.
 - Formats: AU (`aumf`, so it can take MIDI) and VST3 on macOS; VST3 on Windows x64 with an Inno Setup installer (`build/windows/snapline.iss`). No standalone app. CMake owns the build.
-- `Source/SnaplineDsp.*`: the engine (YIN tracking → correction → PSOLA resynthesis). It has no JUCE plugin types, so `tools/render` can use it. `Source/PitchDetector.*`: FFT YIN. `Source/Scales.h`, `Source/Presets.h`: scales and factory presets. `Source/PluginProcessor.*`: parameters, MIDI notes, presets as programs, latency and state. `Source/PluginEditor.*`, `Source/PitchGraph.*`: UI. `Source/DesignTokens.h`: dark and light palettes.
+- `Source/SnaplineDsp.*`: the engine (YIN tracking → correction → PSOLA resynthesis). It has no JUCE plugin types, so `tools/render` can use it. `Source/PitchDetector.*`: FFT YIN with pYIN-style candidate scoring. `Source/LpcEnvelope.*`: LPC analysis, envelope warping and lattice filters for the LPC formant methods. `Source/Scales.h`, `Source/Presets.h`: scales and factory presets. `Source/PluginProcessor.*`: parameters, MIDI notes, presets as programs, latency and state. `Source/PluginEditor.*`, `Source/PitchGraph.*`: UI. `Source/DesignTokens.h`: dark and light palettes.
 - **System design and next work: `docs/ARCHITECTURE.md`** (read it first). How the engine works: `docs/HOW_IT_WORKS.md`. Look: `docs/DESIGN.md`.
 - Design follows Prism (flat macOS style, one accent, dark + light). Theme tokens: `design/theme/tokens.css` ↔ `Source/DesignTokens.h`. Logo masters: `design/logo/make.py` (the in-plugin mark uses the same paths). README art: `design/banners/render.sh` (headless Chrome) → `docs/art`.
 

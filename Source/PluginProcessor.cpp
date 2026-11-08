@@ -24,6 +24,7 @@ constexpr auto throatId = "throat";
 constexpr auto mixId = "mix";
 constexpr auto outputId = "output";
 constexpr auto bypassId = "bypass";
+constexpr auto formantMethodId = "formantMethod";
 
 juce::String noteId (int pitchClass) { return "note" + juce::String (pitchClass); }
 
@@ -93,6 +94,7 @@ SnaplineAudioProcessor::SnaplineAudioProcessor()
     raw.mix = get (mixId);
     raw.output = get (outputId);
     raw.bypass = get (bypassId);
+    raw.formantMethod = get (formantMethodId);
 
     for (const auto& id : presetParameterIds)
         parameters.addParameterListener (id, this);
@@ -150,6 +152,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout SnaplineAudioProcessor::crea
     p.add (std::make_unique<Float> (juce::ParameterID { mixId, 1 }, "Mix", Range (0.0f, 100.0f, 0.1f), 100.0f, withUnit ("%", 0)));
     p.add (std::make_unique<Float> (juce::ParameterID { outputId, 1 }, "Output", Range (-24.0f, 12.0f, 0.01f), 0.0f, withUnit (" dB", 1)));
     p.add (std::make_unique<Bool> (juce::ParameterID { bypassId, 1 }, "Bypass", false));
+    // Appended last (version 2) so existing sessions and hosts keep every earlier parameter index.
+    // Default Classic: sessions saved before it existed sound exactly as they did.
+    p.add (std::make_unique<Choice> (juce::ParameterID { formantMethodId, 2 }, "Formant Method",
+                                     juce::StringArray { "Classic", "LPC Envelope", "LPC Source-Filter" }, 0));
     return p;
 }
 
@@ -253,6 +259,7 @@ snapline::SnaplineParams SnaplineAudioProcessor::readParameters()
     p.mix = read (raw.mix);
     p.outputDb = read (raw.output);
     p.bypass = read (raw.bypass) >= 0.5f;
+    p.formantMethod = (snapline::FormantMethod) juce::jlimit (0, 2, juce::roundToInt (read (raw.formantMethod)));
     return p;
 }
 

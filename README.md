@@ -17,7 +17,7 @@
 ![Languages](https://img.shields.io/github/languages/count/JonneNieminen/Snapline)
 ![Code size](https://img.shields.io/github/languages/code-size/JonneNieminen/Snapline)
 [![JUCE](https://img.shields.io/badge/JUCE-9-8DC63F)](https://juce.com)
-[![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)](https://isocpp.org)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)](https://isocpp.org)
 
 A sung line goes in wobbling and comes out on the note: natural, polished or hard-snapped,<br/>
 in real time, with formants that stay human. Tune by key and scale, your own notes or MIDI. Nothing leaves your computer.
@@ -47,7 +47,7 @@ in real time, with formants that stay human. Tune by key and scale, your own not
 ## Features
 
 - **Natural or hard-tuned**: *Retune speed* runs from instant snapping (0 ms) to slow, transparent correction. *Humanize* lets sustained notes relax, *Tolerance* only touches notes the singer is already near, and *Amount* blends in as much of the correction as you want.
-- **Formants stay put**: pitch-synchronous resynthesis (PSOLA) moves the pitch without the chipmunk effect. Shift the *Formant* or *Throat* length separately for character, or turn *Preserve formants* off for a synthetic sound.
+- **Formants stay put**: pitch-synchronous resynthesis (PSOLA) moves the pitch without the chipmunk effect. Shift the *Formant* or *Throat* length separately for character, or turn *Preserve formants* off for a synthetic sound. Two LPC *Methods* model the vocal tract and move only its resonances, for cleaner formant shifts.
 - **Keys, scales and custom notes**: 12 scales in every key. Click the keys in *Target notes* to add or drop notes.
 - **MIDI control**: snap to the notes you hold on a MIDI keyboard, or force the vocal to exactly the note you hold.
 - **Studio and Live modes**: *Studio* looks ahead for the cleanest result and reports a fixed 100 ms delay that your DAW compensates for. *Live* keeps the delay low (typically 8–20 ms) for monitoring while you record.
@@ -95,6 +95,7 @@ Then rescan plugins in your DAW. In Logic Pro, Snapline is under **Audio Units �
 | **Formant** | Moves the voice's character up or down without changing pitch (±6 st). |
 | **Throat** | Models a longer, darker (above 100 %) or shorter, brighter throat. |
 | **Preserve formants** | On: natural voice at any pitch. Off: formants follow the pitch. |
+| **Method** | How Formant, Throat and Preserve formants work. *Classic*: the original, lightest. *LPC envelope* and *LPC source-filter*: move the voice's resonances with a vocal-tract model, cleaner when you shift formants. |
 | **Transpose** | Shifts the corrected pitch by up to an octave. |
 | **Mix · Output** | Dry/wet blend (time-aligned in Studio) and output level. |
 | **A4 tuning** | Reference pitch, 415–466 Hz. |
@@ -115,7 +116,7 @@ Live mode's delay adapts to the voice. It needs about two to three pitch periods
 
 ## Build from source
 
-Requirements: macOS, CMake 3.22+, C++17, Xcode command line tools and JUCE 9.0.5 or newer.
+Requirements: macOS, CMake 3.22+, C++20, Xcode command line tools and JUCE 9.0.5 or newer.
 
 ```bash
 git clone https://github.com/JonneNieminen/Snapline.git && cd Snapline

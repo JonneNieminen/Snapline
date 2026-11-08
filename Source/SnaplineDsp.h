@@ -10,6 +10,17 @@ enum class Mode { live = 0, studio = 1 };
 
 enum class InputType { soprano = 0, altoTenor = 1, lowMale = 2, instrument = 3 };
 
+/**
+    How Formant, Throat and "Preserve formants: off" move the vocal-tract envelope.
+    - classic: grains are resampled (the original method; fastest, the default).
+    - lpcEnvelope: grains are never resampled (pure PSOLA keeps the formants); when the envelope
+      should move, the output is whitened by the source LPC envelope and re-coloured by a
+      frequency-warped copy of it. With no formant change it is identical to classic.
+    - lpcSourceFilter: the input is inverse-filtered to its LPC residual (the glottal excitation),
+      PSOLA shifts the residual, and the (possibly warped) envelope is re-applied afterwards.
+*/
+enum class FormantMethod { classic = 0, lpcEnvelope = 1, lpcSourceFilter = 2 };
+
 /** Everything the engine needs, in user-facing units. */
 struct SnaplineParams
 {
@@ -28,6 +39,7 @@ struct SnaplineParams
     float vibratoOnsetMs = 250.0f;  // delay after a note starts
     float naturalVibrato = 0.0f;    // %: -100 removes the singer's own vibrato, 0 keeps it, +100 doubles it
     bool preserveFormants = true;
+    FormantMethod formantMethod = FormantMethod::classic;
     float formantShift = 0.0f;      // semitones
     float throat = 100.0f;          // % of natural throat length
     float mix = 100.0f;             // %

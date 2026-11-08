@@ -400,16 +400,22 @@ SnaplineAudioProcessorEditor::SnaplineAudioProcessorEditor (SnaplineAudioProcess
     for (const auto& s : snapline::scales) scale.addItem (s.name, scale.getNumItems() + 1);
     inputType.addItemList ({ "Soprano", "Alto / Tenor", "Low Male", "Instrument" }, 1);
     midiMode.addItemList ({ "Off", "Snap to held notes", "Force to held note" }, 1);
+    formantMethod.addItemList ({ "Classic", "LPC envelope", "LPC source-filter" }, 1);
     configureCombo (key, "Key", "The song's key.");
     configureCombo (scale, "Scale", "Notes the vocal is tuned to. Chromatic allows every note; Custom uses the keys you pick below.");
     configureCombo (inputType, "Input type", "The voice's range. It sets where pitch is searched for, which avoids octave mistakes.");
     configureCombo (midiMode, "MIDI notes", "Use MIDI from the track: snap to the notes you hold, or force the vocal to the note you hold.");
+    configureCombo (formantMethod, "Formant method",
+                    "How Formant, Throat and Preserve formants change the voice. Classic: the original, lightest method. "
+                    "LPC envelope: moves the voice's resonances with a vocal-tract model, the same as Classic when nothing is shifted. "
+                    "LPC source-filter: retunes the voice's raw excitation and puts the vocal tract back on afterwards.");
 
     auto& state = audioProcessor.parameters;
     keyAttachment = std::make_unique<ComboAttachment> (state, "key", key);
     scaleAttachment = std::make_unique<ComboAttachment> (state, "scale", scale);
     inputTypeAttachment = std::make_unique<ComboAttachment> (state, "inputType", inputType);
     midiModeAttachment = std::make_unique<ComboAttachment> (state, "midiMode", midiMode);
+    formantMethodAttachment = std::make_unique<ComboAttachment> (state, "formantMethod", formantMethod);
 
     noteStrip.onToggle = [this] (int pc) { audioProcessor.toggleNote (pc); };
     noteStrip.setTitle ("Target notes");
@@ -661,6 +667,9 @@ void SnaplineAudioProcessorEditor::paint (juce::Graphics& g)
     paintCard (g, cards[0], "Correction");
     paintCard (g, cards[1], "Vibrato");
     paintCard (g, cards[2], "Character");
+    g.setColour (colours.text);
+    g.setFont (uiFont (13.0f));
+    g.drawText ("Method", juce::Rectangle<int> (cards[2].getX() + 18, formantMethod.getY(), 108, formantMethod.getHeight()), juce::Justification::centredLeft);
     paintCard (g, cards[3], "Output");
 }
 
@@ -706,6 +715,7 @@ void SnaplineAudioProcessorEditor::resized()
     layoutRows (cards[2], { &formantShift, &throat, &transpose });
     layoutRows (cards[3], { &mix, &output, &reference });
     preserveFormants.setBounds (cards[2].getRight() - 18 - 170, cards[2].getY() + 12, 170, 24);
+    formantMethod.setBounds (cards[2].getX() + 18 + 108, cards[2].getY() + 46 + 3 * 28, cards[2].getWidth() - 36 - 108, 26);
 }
 
 void SnaplineAudioProcessorEditor::timerCallback()

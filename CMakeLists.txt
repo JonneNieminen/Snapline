@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 project(Snapline VERSION 1.0.0 LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Sources are UTF-8; MSVC otherwise reads them in the system code page.
@@ -36,6 +36,8 @@ juce_add_plugin(Snapline
 juce_generate_juce_header(Snapline)
 
 set(SNAPLINE_DSP_SOURCES
+    Source/LpcEnvelope.cpp
+    Source/LpcEnvelope.h
     Source/PitchDetector.cpp
     Source/PitchDetector.h
     Source/SnaplineDsp.cpp

@@ -112,6 +112,7 @@ private:
         std::atomic<float>* mix = nullptr;
         std::atomic<float>* output = nullptr;
         std::atomic<float>* bypass = nullptr;
+        std::atomic<float>* formantMethod = nullptr;
     } raw;
 
     snapline::SnaplineParams readParameters();

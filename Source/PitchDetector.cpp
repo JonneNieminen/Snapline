@@ -7,6 +7,17 @@ namespace
 {
 constexpr float subMultipleMargin = 0.10f;  // a shorter lag may be this much less periodic and still win
 constexpr float subMultipleCeiling = 0.35f; // ... but never if it is not clearly periodic itself
+constexpr int maxCandidates = 24;           // local minima of d'(tau) scored per frame
+constexpr float priorBeta = 18.0f;          // pYIN threshold prior Beta(2, 18)
+constexpr float continuityCents = 300.0f;   // width of the continuity prior around the previous pitch
+constexpr float continuityFloor = 0.15f;    // a far candidate keeps this much weight (real leaps still win)
+}
+
+float PitchDetector::thresholdCdf (float s) const
+{
+    const float x = juce::jlimit (0.0f, 1.0f, s) * (float) priorSteps;
+    const int k = juce::jmin (priorSteps - 1, (int) x);
+    return priorCdf[(size_t) k] + (priorCdf[(size_t) k + 1] - priorCdf[(size_t) k]) * (x - (float) k);
 }
 
 void PitchDetector::prepare (double sampleRate, int maxWindow)
@@ -23,9 +34,18 @@ void PitchDetector::prepare (double sampleRate, int maxWindow)
     b.assign ((size_t) (2 << maxOrder), 0.0f);
     prefix.assign ((size_t) (2 * maxWindow + 1), 0.0);
     diff.assign ((size_t) (maxWindow + 2), 0.0f);
+
+    // Beta(2, b) has the closed-form CDF  I_x(2, b) = 1 - (1 - x)^b (1 + b x).
+    priorCdf.resize ((size_t) priorSteps + 1);
+    for (int k = 0; k <= priorSteps; ++k)
+    {
+        const double x = (double) k / priorSteps;
+        priorCdf[(size_t) k] = (float) (1.0 - std::pow (1.0 - x, (double) priorBeta) * (1.0 + priorBeta * x));
+    }
 }
 
-PitchDetector::Result PitchDetector::detect (const float* frame, int window, int minLag, float threshold, float minRms)
+PitchDetector::Result PitchDetector::detect (const float* frame, int window, int minLag, float threshold, float minRms,
+                                             float previousHz)
 {
     Result result;
     const int W = window;
@@ -80,18 +100,64 @@ PitchDetector::Result PitchDetector::detect (const float* frame, int window, int
         diff[(size_t) tau] = running > 0.0 ? (float) (d * (double) tau / running) : 1.0f;
     }
 
-    // First dip under the threshold (followed to its local minimum), else the global minimum.
-    int best = -1;
-    for (int tau = minLag; tau < W; ++tau)
+    // pYIN-style candidate scoring (Mauch & Dixon, 2014), adapted for streaming.
+    //
+    // Plain YIN takes the first dip of d'(tau) under one fixed threshold s. pYIN treats s as
+    // uncertain, with a prior P(s) = Beta(2, 18), and asks for each local minimum (tau_i, v_i):
+    // for which thresholds is it the first dip found? Walking the minima in lag order with
+    // m_i = min(v_0 .. v_{i-1}), minimum i wins exactly for s in (v_i, m_i], so
+    //     P(tau_i) = CDF(m_i) - CDF(v_i)   if v_i < m_i, else 0,
+    // and the sum over i, CDF(1) - CDF(min v), is the frame's voiced probability. The full pYIN
+    // then runs a Viterbi pass over many frames; a real-time tracker cannot wait for that, so the
+    // temporal part is collapsed into one step: each candidate is weighted by a continuity prior
+    // around the previous voiced pitch (a soft Gaussian in cents with a floor, so a genuine leap
+    // with a much better dip still wins). The engine's jump guard and two-frame confirmation then
+    // act as the rest of the "HMM".
+    int candTau[maxCandidates];
+    float candValue[maxCandidates];
+    int candidates = 0;
+    for (int tau = juce::jmax (minLag, 1); tau < W - 1 && candidates < maxCandidates; ++tau)
     {
-        if (diff[(size_t) tau] < threshold)
+        const float v = diff[(size_t) tau];
+        if (v < diff[(size_t) tau - 1] && v <= diff[(size_t) tau + 1] && v < 1.0f)
         {
-            while (tau + 1 < W && diff[(size_t) tau + 1] < diff[(size_t) tau])
-                ++tau;
-            best = tau;
-            break;
+            candTau[candidates] = tau;
+            candValue[candidates] = v;
+            ++candidates;
         }
     }
+
+    int best = -1;
+    float bestScore = 0.0f;
+    float voicedProbability = 0.0f;
+    float runningMin = 1.0f;
+    for (int i = 0; i < candidates; ++i)
+    {
+        const float v = candValue[i];
+        if (v >= runningMin)
+            continue;
+        const float probability = thresholdCdf (runningMin) - thresholdCdf (v);
+        runningMin = v;
+        voicedProbability += probability;
+        float weight = 1.0f;
+        if (previousHz > 0.0f)
+        {
+            const float cents = 1200.0f * std::log2 ((float) fs / ((float) candTau[i] * previousHz));
+            const float z = cents / continuityCents;
+            weight = continuityFloor + (1.0f - continuityFloor) * std::exp (-0.5f * z * z);
+        }
+        // The caller's threshold keeps its YIN meaning: a dip under it is always a candidate
+        // worth having, so it is never outscored by a later, deeper dip from the prior alone
+        // unless continuity says so.
+        const float score = probability * weight + (v < threshold && best < 0 ? 1.0e-3f : 0.0f);
+        if (score > bestScore)
+        {
+            bestScore = score;
+            best = candTau[i];
+        }
+    }
+    result.voicedProbability = voicedProbability;
+
     if (best < 0)
     {
         best = minLag;

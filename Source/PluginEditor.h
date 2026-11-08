@@ -109,7 +109,7 @@ private:
     snapline::theme::Palette colours;
     juce::TooltipWindow tooltipWindow { this, 600 };
 
-    juce::ComboBox preset, key, scale, inputType, midiMode;
+    juce::ComboBox preset, key, scale, inputType, midiMode, formantMethod;
     NoteStrip noteStrip;
     PitchGraph graph;
     Segmented modeSwitch { { "Live", "Studio" } };
@@ -126,7 +126,7 @@ private:
 
     std::unique_ptr<juce::ParameterAttachment> modeAttachment;
     using ComboAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
-    std::unique_ptr<ComboAttachment> keyAttachment, scaleAttachment, inputTypeAttachment, midiModeAttachment;
+    std::unique_ptr<ComboAttachment> keyAttachment, scaleAttachment, inputTypeAttachment, midiModeAttachment, formantMethodAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> preserveAttachment, bypassAttachment;
 
     juce::Rectangle<int> sidebar, header, cards[4];

@@ -5,7 +5,7 @@ Snapline corrects a monophonic vocal in three stages: it **tracks** the pitch, *
 ## 1. Tracking
 
 - The input is summed to mono and analysed 375 times a second (a hop of about 2.7 ms).
-- Each frame runs [YIN](https://audition.ens.fr/adc/pdf/2002_JASA_YIN.pdf): the difference function is computed with an FFT cross-correlation, normalised, and the first dip under 0.15 is refined with parabolic interpolation.
+- Each frame runs [YIN](https://audition.ens.fr/adc/pdf/2002_JASA_YIN.pdf): the difference function is computed with an FFT cross-correlation and normalised. Instead of taking the first dip under one fixed threshold, every dip is scored the way [pYIN](https://doi.org/10.1109/ICASSP.2014.6853678) does (how likely it is to be the first dip, over a spread of possible thresholds) and weighted towards the previous pitch, so a breathy note does not hop to an octave below for a frame. The winner is refined with parabolic interpolation.
 - **Input type** sets the search range (Soprano 130–1100 Hz, Alto/Tenor 80–800 Hz, Low Male 55–420 Hz, Instrument 45–1300 Hz) and the window length.
 - A frame counts as voiced when it is periodic enough, above −60 dBFS and within 22 dB of the recent vocal level. Short dropouts of up to 30 ms inside a note are bridged, and sudden jumps to two to six times the previous pitch are treated as octave errors and folded back. The detector also prefers a shorter period when it is almost as periodic, so breathy or fading notes are not read an octave or a twelfth too low. A big leap has to appear twice in a row before it is believed.
 
@@ -15,7 +15,7 @@ For every voiced frame:
 
 1. A median over neighbouring frames picks the **target note**: the nearest allowed note from the key and scale, the custom notes, or the held MIDI notes. *Force to held note* uses the held note's exact octave. A 25-cent hysteresis stops wobbles from flipping between two notes.
 2. The **correction** is the distance from the note to where the singer *is*. For the first 120 ms of a note that is the instantaneous pitch; after that it is the singer's slow pitch centre (a 3 Hz low-pass), so the vibrato around the centre is not corrected away. *Tolerance* fades the correction out when the singer is far from the note.
-3. *Retune speed* smooths the correction with a one-pole filter (time constant = the retune time; 0 ms = instant). *Humanize* lengthens that time on notes held longer than about 120 ms. After every onset or note change the correction also fades in over 20-80 ms (longer with Humanize), so a scoop keeps its shape, and it never overshoots the note.
+3. *Retune speed* smooths the correction with a critically damped spring (it gets 63 % of the way in the retune time; 0 ms = instant). It eases in rather than jumping at the start of every correction and never overshoots. *Humanize* lengthens that time on notes held longer than about 120 ms. After every onset or note change the correction also fades in over 20-80 ms (longer with Humanize), so a scoop keeps its shape, and it never overshoots the note.
 4. *Natural vibrato* then scales the singer's own vibrato: -100 % flattens it, 0 % keeps it, +100 % doubles it. *Amount* scales the correction; *Vibrato* and *Transpose* are added on top.
 
 **Studio** mode decides each frame 8 frames (about 21 ms) late, so the note decision can look ahead. **Live** mode decides at once and briefly extrapolates the correction for audio that is newer than the last analysed frame.
@@ -24,7 +24,8 @@ For every voiced frame:
 
 - **Pitch marks** are placed once per period, on the peak of a low-passed copy of the signal near where the next period is expected. Unvoiced sound gets marks every 5.6 ms. Each mark is refined by cross-correlating the waveform with the one before it, which keeps low and breathy voices from turning rough. Near the edge of a voiced sound the shift fades in over about 5 ms, so consonants do not buzz.
 - Each output **grain** is two periods long, centred on a mark and Hann-windowed. Grains are overlap-added at the *target* period, so the pitch changes while each grain keeps the vocal tract's response: the formants stay where they were.
-- **Formant** and **Throat** resample the grains themselves (factor 0.5–2), which moves the formants without changing the pitch. With *Preserve formants* off, the grains are also resampled by the pitch ratio, so formants follow the pitch.
+- **Formant** and **Throat** resample the grains themselves (factor 0.5–2), which moves the formants without changing the pitch. With *Preserve formants* off, the grains are also resampled by the pitch ratio, so formants follow the pitch. This is the *Classic* formant method.
+- The two **LPC** formant methods model the vocal tract instead: every 5 ms a 16-pole linear-prediction filter is fitted to the voice (Levinson-Durbin). *LPC envelope* leaves the grains untouched and, only while the envelope should move, whitens the output with that filter and re-colours it with a copy moved in frequency. *LPC source-filter* removes the vocal tract from the input first, retunes the remaining excitation (the glottal pulses) and puts the vocal tract back afterwards. Both move only the resonances (Classic also stretches the pulse itself) and sound cleaner when Formant or Throat is moved; without a formant change, *LPC envelope* is identical to Classic and source-filter measures the same. They cost about 0.4 % more of one core while active.
 - When correction is zero, grains are laid exactly where they came from and the output reconstructs the input (the Studio null test reaches about −150 dB).
 
 ### Delay
@@ -43,6 +44,7 @@ A grain can only be built once a full period after its centre has arrived. **Stu
 
 - hard-tune accuracy in both modes (about 1 cent mean error)
 - that natural settings at least halve the error
+- both LPC formant methods: tuning, level, transparency, formant shift up and down, formants following the pitch, odd block sizes
 - level, clipping and NaNs
 - the Studio null and its reported latency, and the Live delay range
 - vibrato kept or flattened by *Natural vibrato*, scoops kept and settled, no clicks or spectral jumps at voiced/unvoiced edges, and period jitter on a breathy low voice

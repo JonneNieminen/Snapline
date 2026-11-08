@@ -758,8 +758,15 @@ int analyseFile (const juce::File& file, const juce::File& outDir, InputType inp
         auto nat = base; nat.mode = Mode::studio; nat.retuneMs = 85.0f; nat.humanize = 45.0f; nat.tolerance = 35.0f; configs.push_back ({ "studio-natural", nat });
         auto livePop = pop; livePop.mode = Mode::live; configs.push_back ({ "live-pop", livePop });
         auto chroma = pop; chroma.allowed = allNotes; configs.push_back ({ "studio-pop-chrom", chroma });
+        // Formant methods: the same Pop correction resynthesised from the LPC residual, and a +3 st
+        // formant shift with each method (the envelope distance there is the intended change).
+        auto popSf = pop; popSf.formantMethod = FormantMethod::lpcSourceFilter; configs.push_back ({ "studio-pop-lpcsf", popSf });
+        auto livePopSf = livePop; livePopSf.formantMethod = FormantMethod::lpcSourceFilter; configs.push_back ({ "live-pop-lpcsf", livePopSf });
+        auto fmt = pop; fmt.formantShift = 3.0f; configs.push_back ({ "studio-fmt3-classic", fmt });
+        auto fmtEnv = fmt; fmtEnv.formantMethod = FormantMethod::lpcEnvelope; configs.push_back ({ "studio-fmt3-lpcenv", fmtEnv });
+        auto fmtSf = fmt; fmtSf.formantMethod = FormantMethod::lpcSourceFilter; configs.push_back ({ "studio-fmt3-lpcsf", fmtSf });
     }
-    std::printf ("  %-16s %-9s %-26s %-26s %-27s %-27s %-18s %s\n", "config", "side/mid", "null dB  <250 / mid / >2k", "spectral dist dB",
+    std::printf ("  %-19s %-9s %-26s %-26s %-27s %-27s %-18s %s\n", "config", "side/mid", "null dB  <250 / mid / >2k", "spectral dist dB",
                  "envelope dist dB", "level flutter dB in->out", "roughness in->out", "pitch micro-movement ct");
     for (auto& cfg : configs)
     {
@@ -848,7 +855,7 @@ int analyseFile (const juce::File& file, const juce::File& outDir, InputType inp
                          dMin * 1000.0 / fs, dMax * 1000.0 / fs, dSum / std::max (1, dCount) * 1000.0 / fs);
         const auto rep = compareBands (refL, outL, fs);
         const auto art = artifactMetrics (refL, outL, fs, inputType);
-        std::printf ("  %-16s %+7.1f   %6.1f / %6.1f / %6.1f      %5.2f / %5.2f / %5.2f      %4.2f / %4.2f / %4.2f        %4.2f>%4.2f %4.2f>%4.2f %4.2f>%4.2f   %.3f>%.3f   %4.1f>%4.1f   (%.2f %% CPU)\n", cfg.name,
+        std::printf ("  %-19s %+7.1f   %6.1f / %6.1f / %6.1f      %5.2f / %5.2f / %5.2f      %4.2f / %4.2f / %4.2f        %4.2f>%4.2f %4.2f>%4.2f %4.2f>%4.2f   %.3f>%.3f   %4.1f>%4.1f   (%.2f %% CPU)\n", cfg.name,
                      sideToMidDb (outL, outR), rep.nullDb[0], rep.nullDb[1], rep.nullDb[2], rep.lsdDb[0], rep.lsdDb[1], rep.lsdDb[2],
                      art.envelope[0], art.envelope[1], art.envelope[2], art.flutterIn[0], art.flutterOut[0], art.flutterIn[1], art.flutterOut[1],
                      art.flutterIn[2], art.flutterOut[2], art.roughIn, art.roughOut, art.microIn, art.microOut, 100.0 * seconds / (length / fs));
@@ -996,7 +1003,7 @@ void humanChecks (double fs, Mode mode, const NoteMask cMajor)
                     if (std::abs (1200.0 * std::log2 ((double) r.hz / f0)) > 120.0) ++wrong;
                 }
             }
-        check (frames > 500 && wrong * 100 <= frames * 4, "detector keeps the period on noisy frames (<= 4 %)",
+        check (frames > 500 && wrong * 100 <= frames, "detector keeps the period on noisy frames (<= 1 %)",
                juce::String::formatted ("%d of %d accepted frames off by more than 120 ct", wrong, frames));
     }
 
@@ -1237,6 +1244,101 @@ int main (int argc, char** argv)
             check (c1 > c0 * 1.12 && a.meanAbs < 8.0, "formant +4 st keeps pitch",
                    juce::String::formatted ("centroid %.0f -> %.0f Hz, pitch error %.1f ct", c0, c1, a.meanAbs));
             if (fs == 48000.0) writeWav (outDir, "formant-up-" + tag, r1.left, fs);
+        }
+
+        // LPC formant methods: same tuning, level and transparency as Classic; Formant and
+        // "Preserve formants: off" move the envelope; the envelope method is Classic when nothing moves.
+        for (auto method : { FormantMethod::lpcEnvelope, FormantMethod::lpcSourceFilter })
+        {
+            const juce::String mn = method == FormantMethod::lpcEnvelope ? "lpc envelope" : "lpc source-filter";
+            const juce::String file = method == FormantMethod::lpcEnvelope ? "lpcenv" : "lpcsf";
+            SnaplineParams base;
+            base.allowed = cMajor;
+            base.retuneMs = 0.0f;
+            base.naturalVibrato = -100.0f;
+            base.formantMethod = method;
+            for (Mode mode : { Mode::studio, Mode::live })
+            {
+                const bool studio = mode == Mode::studio;
+                const juce::String m = mn + (studio ? ", studio" : ", live");
+                auto hard = base;
+                hard.mode = mode;
+                const auto r = run (vocal, fs, 256, hard);
+                SnaplineDsp probe;
+                probe.prepare (fs, 256, mode);
+                const double delay = probe.getLatencySamples (mode) / fs + (studio ? 0.0 : 0.03);
+                const auto acc = accuracy (track (r.left, fs), delay, melody, [&] (const Note& n) { return nearestInScale (n.midi * 100.0, cMajor) * 100.0; });
+                const double levelDiff = toDb (rmsOf (r.left)) - toDb (inputRms);
+                check (acc.meanAbs < 4.0 && acc.maxAbs < 15.0 && finite (r) && peakOf (r) < 0.99 && std::abs (levelDiff) < 1.5,
+                       ("hard tune, level (" + m + ")").toRawUTF8(),
+                       juce::String::formatted ("mean %.2f ct, max %.1f ct, level %+.2f dB, peak %.1f dBFS, %.2f %% of one core", acc.meanAbs, acc.maxAbs, levelDiff,
+                                                toDb (peakOf (r)), 100.0 * r.seconds / (melodyEnd + 0.4)));
+                if (! studio)
+                    check (r.minDelay >= (float) probe.getLatencySamples (mode) && r.maxDelay < 0.03 * fs, ("live delay under 30 ms (" + mn + ")").toRawUTF8(),
+                           juce::String::formatted ("%.1f-%.1f ms", r.minDelay * 1000.0 / fs, r.maxDelay * 1000.0 / fs));
+                writeWav (outDir, "hardtune-" + file + (studio ? "-studio-" : "-live-") + tag, r.left, fs);
+            }
+
+            auto none = base;
+            none.amount = 0.0f;
+            const auto r0 = run (vocal, fs, 256, none);
+            SnaplineDsp studioProbe;
+            studioProbe.prepare (fs, 256, Mode::studio);
+            const int lag = studioProbe.getLatencySamples (Mode::studio);
+            const double depth = nullDepth (vocal, r0.left, lag);
+            check (depth > 40.0, ("transparent at 0 % amount (" + mn + ")").toRawUTF8(), juce::String::formatted ("null %.1f dB", depth));
+
+            if (method == FormantMethod::lpcEnvelope)
+            {
+                // Nothing to move: the envelope filters stay off and the output is Classic's, sample for sample.
+                auto classic = base;
+                classic.formantMethod = FormantMethod::classic;
+                const auto rc = run (vocal, fs, 256, classic);
+                const auto rl = run (vocal, fs, 256, base);
+                check (nullDepth (rc.left, rl.left, 0) > 140.0, "lpc envelope equals classic with no formant change",
+                       juce::String::formatted ("null %.0f dB", nullDepth (rc.left, rl.left, 0)));
+            }
+
+            auto up = base, down = base, follow = base;
+            up.formantShift = 4.0f;
+            down.formantShift = -4.0f;
+            follow.preserveFormants = false;
+            follow.transpose = 5.0f;
+            auto transposed = base;
+            transposed.transpose = 5.0f;
+            const auto rb = run (vocal, fs, 256, base);
+            const auto ru = run (vocal, fs, 256, up);
+            const auto rd = run (vocal, fs, 256, down);
+            const auto rf = run (vocal, fs, 256, follow);
+            const auto rt = run (vocal, fs, 256, transposed);
+            const double c0 = spectralCentroid (rb.left, fs, 0.4, melodyEnd);
+            const double cu = spectralCentroid (ru.left, fs, 0.4, melodyEnd);
+            const double cd = spectralCentroid (rd.left, fs, 0.4, melodyEnd);
+            const double cf = spectralCentroid (rf.left, fs, 0.4, melodyEnd);
+            const double ct = spectralCentroid (rt.left, fs, 0.4, melodyEnd);
+            const auto au = accuracy (track (ru.left, fs), 0.1, melody, [&] (const Note& n) { return nearestInScale (n.midi * 100.0, cMajor) * 100.0; }, 0.2);
+            const auto ad = accuracy (track (rd.left, fs), 0.1, melody, [&] (const Note& n) { return nearestInScale (n.midi * 100.0, cMajor) * 100.0; }, 0.2);
+            check (cu > c0 * 1.12 && cd < c0 * 0.92 && au.meanAbs < 8.0 && ad.meanAbs < 8.0 && finite (ru) && finite (rd) && peakOf (ru) < 0.99,
+                   ("formant +-4 st moves the envelope, keeps pitch (" + mn + ")").toRawUTF8(),
+                   juce::String::formatted ("centroid %.0f / %.0f / %.0f Hz, pitch error %.1f / %.1f ct", cd, c0, cu, ad.meanAbs, au.meanAbs));
+            check (cf > ct * 1.12 && finite (rf), ("formants follow the pitch when not preserved (" + mn + ")").toRawUTF8(),
+                   juce::String::formatted ("+5 st centroid %.0f Hz preserved, %.0f Hz following", ct, cf));
+            if (fs == 48000.0)
+            {
+                writeWav (outDir, "formant-up-" + file + "-" + tag, ru.left, fs);
+                writeWav (outDir, "formant-down-" + file + "-" + tag, rd.left, fs);
+            }
+
+            // Odd block sizes and a mono bus.
+            double worst = 0;
+            for (int block : { 31, 997 })
+            {
+                auto p = up;
+                const auto r = run (vocal, fs, block, p, block != 31);
+                const auto a = accuracy (track (r.left, fs), 0.1, melody, [&] (const Note& n) { return nearestInScale (n.midi * 100.0, cMajor) * 100.0; }, 0.2);
+                worst = std::max (worst, finite (r) ? a.meanAbs : 9999.0);
+            }
+            check (worst < 5.0, ("block sizes 31 (mono) / 997 (" + mn + ")").toRawUTF8(), juce::String::formatted ("worst mean error %.2f ct", worst));
         }
 
         // Silence in, silence out.
