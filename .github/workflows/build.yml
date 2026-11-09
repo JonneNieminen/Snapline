@@ -121,8 +121,11 @@ jobs:
             }
           }
           Expand-Archive pluginval.zip -DestinationPath pluginval-bin
-          & .\pluginval-bin\pluginval.exe --strictness-level 10 --validate-in-process "build\Snapline_artefacts\Release\VST3\Snapline.vst3"
-          if ($LASTEXITCODE -ne 0) { throw "pluginval failed with exit code $LASTEXITCODE" }
+          # pluginval.exe is a GUI-subsystem program: `&` returns at once without an exit code (the
+          # check then threw while pluginval was still running), so wait for it explicitly.
+          $p = Start-Process -FilePath .\pluginval-bin\pluginval.exe -NoNewWindow -Wait -PassThru `
+            -ArgumentList '--strictness-level', '10', '--validate-in-process', "`"$PWD\build\Snapline_artefacts\Release\VST3\Snapline.vst3`""
+          if ($p.ExitCode -ne 0) { throw "pluginval failed with exit code $($p.ExitCode)" }
       - name: Build installer
         shell: pwsh
         run: |
