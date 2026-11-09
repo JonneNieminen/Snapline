@@ -7,7 +7,6 @@ namespace
 {
 constexpr float subMultipleMargin = 0.10f;  // a shorter lag may be this much less periodic and still win
 constexpr float subMultipleCeiling = 0.35f; // ... but never if it is not clearly periodic itself
-constexpr int maxCandidates = 24;           // local minima of d'(tau) scored per frame
 constexpr float priorBeta = 18.0f;          // pYIN threshold prior Beta(2, 18)
 constexpr float continuityCents = 300.0f;   // width of the continuity prior around the previous pitch
 constexpr float continuityFloor = 0.15f;    // a far candidate keeps this much weight (real leaps still win)
@@ -127,8 +126,17 @@ PitchDetector::Result PitchDetector::detect (const float* frame, int window, int
         }
     }
 
+    const auto refine = [this] (int tau)
+    {
+        float t = (float) tau;
+        const float s0 = diff[(size_t) tau - 1], s1 = diff[(size_t) tau], s2 = diff[(size_t) tau + 1];
+        const float denom = s0 - 2.0f * s1 + s2;
+        if (std::abs (denom) > 1.0e-9f)
+            t += juce::jlimit (-0.5f, 0.5f, 0.5f * (s0 - s2) / denom);
+        return t;
+    };
     int best = -1;
-    float bestScore = 0.0f;
+    float bestScore = 0.0f, bestProbability = 0.0f;
     float voicedProbability = 0.0f;
     float runningMin = 1.0f;
     for (int i = 0; i < candidates; ++i)
@@ -139,6 +147,8 @@ PitchDetector::Result PitchDetector::detect (const float* frame, int window, int
         const float probability = thresholdCdf (runningMin) - thresholdCdf (v);
         runningMin = v;
         voicedProbability += probability;
+        if (probability > 0.0f && result.candidateCount < maxCandidates)
+            result.candidates[result.candidateCount++] = { (float) fs / refine (candTau[i]), probability };
         float weight = 1.0f;
         if (previousHz > 0.0f)
         {
@@ -154,6 +164,7 @@ PitchDetector::Result PitchDetector::detect (const float* frame, int window, int
         {
             bestScore = score;
             best = candTau[i];
+            bestProbability = probability;
         }
     }
     result.voicedProbability = voicedProbability;
@@ -185,17 +196,16 @@ PitchDetector::Result PitchDetector::detect (const float* frame, int window, int
         }
     }
 
-    float refined = (float) best;
-    if (best > 1 && best < W)
-    {
-        const float s0 = diff[(size_t) best - 1], s1 = diff[(size_t) best], s2 = diff[(size_t) best + 1];
-        const float denom = s0 - 2.0f * s1 + s2;
-        if (std::abs (denom) > 1.0e-9f)
-            refined += juce::jlimit (-0.5f, 0.5f, 0.5f * (s0 - s2) / denom);
-    }
+    const float refined = best > 1 && best < W ? refine (best) : (float) best;
 
     result.aperiodicity = diff[(size_t) best];
     result.hz = refined > 0.0f ? (float) (fs / (double) refined) : 0.0f;
+    // The guard's choice is a candidate too, at least as likely as the dip it replaced.
+    bool listed = false;
+    for (int i = 0; i < result.candidateCount; ++i)
+        listed = listed || std::abs (result.candidates[i].hz - result.hz) < 1.0e-3f * result.hz;
+    if (! listed && result.hz > 0.0f && result.candidateCount < maxCandidates)
+        result.candidates[result.candidateCount++] = { result.hz, juce::jmax (bestProbability, 1.0e-3f) };
     return result;
 }
 }

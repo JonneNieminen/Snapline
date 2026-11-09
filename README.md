@@ -130,7 +130,7 @@ Products appear under `build/Snapline_artefacts/Release/`. Use `x86_64` for Inte
 Developer tools build with `-DSNAPLINE_BUILD_TOOLS=ON`:
 
 - `SnaplineSnapshot --check` tests the plugin without a DAW: bypass parameter, user presets, saved state, editor sizes, accessibility titles and tooltips.
-- `SnaplineRender [wav-dir]` renders a synthetic off-key vocal at 44.1, 48 and 96 kHz. It checks pitch accuracy, transparency, latency, formants, transpose, MIDI forcing, block sizes, silence and CPU cost, and optionally writes WAV files.
+- `SnaplineRender [wav-dir]` renders a synthetic off-key vocal at 44.1, 48 and 96 kHz. It checks pitch accuracy, transparency, latency, formants, transpose, MIDI forcing, block sizes, silence and CPU cost, runs a voice suite (low male, soprano, breathy, fry and belted voices; `--suite` alone), and optionally writes WAV files. `--envelopes` compares envelope estimators for high voices; `--file <wav> <out-dir>` measures a real recording.
 - `SnaplineSnapshot [dir]` renders the interface in both themes to PNG (the screenshots above).
 
 On Windows (Visual Studio 2022 or newer and CMake), configure with `cmake -S . -B build -A x64` and build `Snapline_VST3` in `Release`; `build/windows/snapline.iss` packages it with [Inno Setup](https://jrsoftware.org/isinfo.php).

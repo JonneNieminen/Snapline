@@ -7,7 +7,9 @@
 // NaNs and CPU cost, at 44.1, 48 and 96 kHz.
 #include "SnaplineDsp.h"
 #include "PitchDetector.h"
+#include "LpcEnvelope.h"
 #include <juce_audio_formats/juce_audio_formats.h>
+#include <complex>
 #include <algorithm>
 #include <chrono>
 #include <functional>
@@ -100,11 +102,130 @@ std::vector<float> makeVocal (double fs, const std::vector<Note>& notes, double 
     return out;
 }
 
+/**
+    A richer synthetic singer for the voice suite (the checks above keep using makeVocal, so their
+    numbers do not move). The source is a band-limited pulse train with harmonic amplitudes
+    1 / k^tilt (tilt 1 = the sawtooth of makeVocal; a pressed or belted voice has a shorter open
+    phase and a flatter source spectrum, tilt about 0.5-0.6). Per-cycle period jitter and
+    amplitude shimmer, and an alternating ("diplophonic") cycle amplitude, give vocal fry.
+    Breath is noise added to the source (shaped by the vocal tract, like the noise of makeVocal)
+    plus aspiration: high-passed noise added after the tract. Both are modulated by the glottal
+    cycle (turbulence is strongest while the folds are open), so breath is cyclostationary but its
+    waveform is not periodic, which is what a pitch shifter must keep.
+
+    The harmonic and the noise parts are also returned separately (same scaling), so a check can
+    know exactly what was periodic in the input. Harmonics stop at `harmonicCeiling`; with a
+    ceiling of 4 kHz the band above 5 kHz contains breath only, and any periodicity there in the
+    output is aspiration that the resynthesis has turned into a buzz.
+*/
+struct Glottis
+{
+    double tilt = 1.0;            // harmonic k has amplitude 1 / k^tilt
+    double jitter = 0.0;          // per-cycle period jitter (fraction, standard deviation)
+    double shimmer = 0.0;         // per-cycle amplitude jitter (fraction)
+    double diplophonia = 0.0;     // every other cycle is quieter by this fraction (fry)
+    double noise = 0.02;          // breath through the vocal tract (as makeVocal)
+    double aspiration = 0.0;      // high-passed breath after the tract
+    double pulsed = 0.0;          // 0..1: how strongly breath follows the glottal cycle
+    double harmonicCeiling = 9000.0;
+    double formantScale = 1.0;
+};
+
+struct Voice
+{
+    std::vector<float> mix, harmonic, breath;
+};
+
+Voice makeVoice (double fs, const std::vector<Note>& notes, double seconds, const Glottis& g)
+{
+    const auto total = (size_t) (seconds * fs);
+    std::vector<float> srcH (total, 0.0f), srcN (total, 0.0f), asp (total, 0.0f);
+    juce::Random rng (1234);
+    const auto gauss = [&rng] { double s = 0; for (int i = 0; i < 6; ++i) s += rng.nextDouble(); return (s - 3.0) * std::sqrt (2.0); };
+    double phase = 0.0, cycleScale = 1.0, cycleGain = 1.0, previousNoise = 0.0;
+    bool oddCycle = false;
+    for (size_t i = 0; i < total; ++i)
+    {
+        const double t = (double) i / fs;
+        const Note* active = nullptr;
+        for (const auto& n : notes)
+            if (t >= n.start && t < n.start + n.length) active = &n;
+        if (active == nullptr)
+            continue;
+        const double age = t - active->start;
+        double midi = active->midi;
+        if (active->glideFrom != 0.0)
+            midi = active->glideFrom + (active->midi - active->glideFrom) * std::min (1.0, age / active->glideTime);
+        midi += active->vibratoCents / 100.0 * std::sin (2.0 * pi * 5.6 * age) * std::min (1.0, age / 0.2);
+        const double f0 = 440.0 * std::pow (2.0, (midi - 69.0) / 12.0) * cycleScale;
+        phase += f0 / fs;
+        if (phase >= 1.0)
+        {
+            phase -= std::floor (phase);
+            cycleScale = 1.0 + g.jitter * gauss();
+            oddCycle = ! oddCycle;
+            cycleGain = (1.0 + g.shimmer * gauss()) * (oddCycle ? 1.0 - g.diplophonia : 1.0);
+        }
+        double s = 0.0;
+        const int harmonics = (int) std::min (80.0, std::min ({ fs * 0.45, 9000.0, g.harmonicCeiling }) / f0);
+        for (int k = 1; k <= harmonics; ++k)
+            s += std::sin (2.0 * pi * k * phase) / std::pow ((double) k, g.tilt);
+        const double env = std::min ({ 1.0, age / 0.03, (active->length - age) / 0.04 });
+        // Breath is strongest in the open phase (the second half of the cycle here).
+        const double open = 1.0 - g.pulsed * (0.5 + 0.5 * std::cos (2.0 * pi * phase));
+        const double white = rng.nextDouble() * 2.0 - 1.0;
+        srcH[i] = (float) (env * 0.5 * s * cycleGain);
+        srcN[i] = (float) (env * g.noise * open * white);
+        asp[i] = (float) (env * g.aspiration * open * (white - previousNoise));
+        previousNoise = white;
+    }
+
+    struct Resonator { double f, bw, gain; };
+    const Resonator formants[] { { 700.0, 110.0, 1.0 }, { 1220.0, 120.0, 0.6 }, { 2600.0, 160.0, 0.3 } };
+    Voice v;
+    v.harmonic.assign (total, 0.0f);
+    v.breath.assign (total, 0.0f);
+    for (const auto& r : formants)
+    {
+        const double rad = std::exp (-pi * r.bw / fs);
+        const double theta = 2.0 * pi * r.f * g.formantScale / fs;
+        const double a1 = -2.0 * rad * std::cos (theta), a2 = rad * rad;
+        for (int part = 0; part < 2; ++part)
+        {
+            const auto& src = part == 0 ? srcH : srcN;
+            auto& dst = part == 0 ? v.harmonic : v.breath;
+            double y1 = 0, y2 = 0;
+            for (size_t i = 0; i < total; ++i)
+            {
+                const double y = (1.0 - rad) * src[i] - a1 * y1 - a2 * y2;
+                y2 = y1;
+                y1 = y;
+                dst[i] += (float) (y * r.gain);
+            }
+        }
+    }
+    for (size_t i = 0; i < total; ++i)
+        v.breath[i] += 0.05f * asp[i];
+    float peak = 0.0f;
+    for (size_t i = 0; i < total; ++i) peak = std::max (peak, std::abs (v.harmonic[i] + v.breath[i]));
+    const float scale = 0.4f / std::max (peak, 1.0e-6f);
+    v.mix.resize (total);
+    for (size_t i = 0; i < total; ++i)
+    {
+        v.harmonic[i] *= scale;
+        v.breath[i] *= scale;
+        v.mix[i] = v.harmonic[i] + v.breath[i];
+    }
+    return v;
+}
+
 struct Render
 {
     std::vector<float> left, right;
     double seconds = 0.0; // processing time
     float minDelay = 1e9f, maxDelay = 0.0f; // effective delay after the first second (samples)
+    std::vector<float> blockDelay;          // reported delay after each block (samples)
+    int block = 256;
 };
 
 Render run (const std::vector<float>& in, double fs, int block, const SnaplineParams& p, bool stereo = true)
@@ -122,6 +243,7 @@ Render run (const std::vector<float>& in, double fs, int block, const SnaplinePa
                      r.left.data() + pos, stereo ? r.right.data() + pos : nullptr, n, p);
         DisplayFrame frames[256];
         while (dsp.popDisplayFrames (frames, 256) > 0) {}
+        r.blockDelay.push_back (dsp.getEffectiveDelaySamples());
         if ((double) pos > fs)
         {
             r.minDelay = std::min (r.minDelay, dsp.getEffectiveDelaySamples());
@@ -129,7 +251,137 @@ Render run (const std::vector<float>& in, double fs, int block, const SnaplinePa
         }
     }
     r.seconds = std::chrono::duration<double> (std::chrono::steady_clock::now() - start).count();
+    r.block = block;
     return r;
+}
+
+/** The output read back on the input's timeline, block by block at the delay the engine reported
+    (constant in Studio; Live's moves). Samples past the end are zero. */
+std::vector<float> alignToInput (const Render& r)
+{
+    std::vector<float> out (r.left.size(), 0.0f);
+    for (size_t n = 0; n < out.size(); ++n)
+    {
+        const size_t blk = std::min (r.blockDelay.size() - 1, n / (size_t) r.block);
+        const auto src = n + (size_t) juce::roundToInt (r.blockDelay[blk]);
+        if (src < r.left.size()) out[n] = r.left[src];
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------- periodicity metrics
+/** RBJ biquad (Butterworth Q) high- or low-pass, run twice: a 4th-order band edge. */
+std::vector<float> butter (const std::vector<float>& x, double fs, double fc, bool highpass)
+{
+    const double w = 2.0 * pi * fc / fs, cw = std::cos (w), alpha = std::sin (w) / (2.0 * std::sqrt (0.5));
+    const double b0 = highpass ? (1.0 + cw) / 2.0 : (1.0 - cw) / 2.0, b1 = highpass ? -(1.0 + cw) : 1.0 - cw, b2 = b0;
+    const double a0 = 1.0 + alpha, a1 = -2.0 * cw, a2 = 1.0 - alpha;
+    std::vector<float> y = x;
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+        for (auto& v : y)
+        {
+            const double in = v, out = (b0 * in + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2) / a0;
+            x2 = x1; x1 = in; y2 = y1; y1 = out;
+            v = (float) out;
+        }
+    }
+    return y;
+}
+
+/** Signal split for the periodicity measures: full band, < 1 kHz, 1-3 kHz, > 3 kHz, and > 5 kHz ("air"). */
+struct BandSet
+{
+    std::vector<float> full, band[3], air;
+    BandSet (const std::vector<float>& x, double fs)
+        : full (x), air (butter (x, fs, 5000.0, true))
+    {
+        band[0] = butter (x, fs, 1000.0, false);
+        band[1] = butter (butter (x, fs, 1000.0, true), fs, 3000.0, false);
+        band[2] = butter (x, fs, 3000.0, true);
+    }
+};
+
+/**
+    Periodicity of a voiced stretch, per band, after Boersma (1993, "Accurate short-term analysis of
+    the fundamental frequency and the harmonics-to-noise ratio of a sampled sound", IFA Proc. 17):
+    for a signal that is a periodic part p plus independent noise n, the normalised correlation of
+    the signal with itself one period later is r = P / (P + N), so
+        HNR = 10 log10 (r / (1 - r)).
+    r is measured as the normalised cross-correlation of two consecutive segments one period apart
+    (each normalised by its own energy, which removes Boersma's window correction), maximised over
+    lags within +-2 samples of the period that YIN finds in the full-band frame.
+
+    Per band, r says how periodic that band is: a resynthesis that blurs the harmonics lowers r in
+    the bands where the voice is periodic (roughness, "phasiness"); one that turns breath into a
+    buzz raises r where the voice is noisy. In the air band of a voice whose harmonics stop at
+    4 kHz there is breath only, so r there is the aspiration periodicity itself (about 0 when the
+    breath is still noise).
+*/
+struct Periodicity
+{
+    double hnrDb = 0, band[3] {}, air = 0;
+    int frames = 0;
+};
+
+Periodicity periodicity (const BandSet& s, double fs, const std::vector<std::pair<double, double>>& spans, float minHz, float maxHz,
+                         const std::vector<float>* gate = nullptr)
+{
+    Periodicity p;
+    const int window = (int) std::ceil (fs / minHz) + 2;
+    PitchDetector det;
+    det.prepare (fs, window);
+    const auto corr = [] (const std::vector<float>& x, size_t a, size_t b, size_t len)
+    {
+        double c = 0, ea = 0, eb = 0;
+        for (size_t i = 0; i < len; ++i)
+        {
+            c += (double) x[a + i] * x[b + i];
+            ea += (double) x[a + i] * x[a + i];
+            eb += (double) x[b + i] * x[b + i];
+        }
+        return ea > 1.0e-14 && eb > 1.0e-14 ? c / std::sqrt (ea * eb) : 0.0;
+    };
+    double hnr = 0, band[3] {}, air = 0;
+    for (const auto& [from, to] : spans)
+        for (double t = from; t + 0.04 < to; t += 0.01)
+        {
+            const auto end = (size_t) (t * fs) + (size_t) (2 * window);
+            if (end >= s.full.size()) break;
+            // The same frames for input and output: those the reference (gate) calls clearly voiced.
+            if (gate != nullptr)
+            {
+                if (end >= gate->size()) break;
+                const auto g = det.detect (gate->data() + end - 2 * (size_t) window, window, (int) (fs / maxHz), 0.2f);
+                if (g.hz <= 0.0f || g.aperiodicity > 0.25f || g.rms < 0.003f) continue;
+            }
+            const auto r = det.detect (s.full.data() + end - 2 * (size_t) window, window, (int) (fs / maxHz), 0.2f);
+            if (r.hz <= 0.0f || r.aperiodicity > 0.6f) continue;
+            const double period = fs / r.hz;
+            const auto len = (size_t) std::max (0.02 * fs, 2.0 * period);
+            const auto a = (size_t) (t * fs);
+            if (a + len + (size_t) period + 4 >= s.full.size()) break;
+            const auto best = [&] (const std::vector<float>& x)
+            {
+                double m = -1.0;
+                for (int d = -2; d <= 2; ++d)
+                    m = std::max (m, corr (x, a, a + (size_t) std::lround (period) + (size_t) (d + 2) - 2, len));
+                return m;
+            };
+            const double full = juce::jlimit (1.0e-4, 0.99999, best (s.full));
+            hnr += 10.0 * std::log10 (full / (1.0 - full));
+            for (int b = 0; b < 3; ++b) band[b] += best (s.band[b]);
+            air += best (s.air);
+            ++p.frames;
+        }
+    if (p.frames > 0)
+    {
+        p.hnrDb = hnr / p.frames;
+        for (int b = 0; b < 3; ++b) p.band[b] = band[b] / p.frames;
+        p.air = air / p.frames;
+    }
+    return p;
 }
 
 struct PitchTrack
@@ -758,6 +1010,9 @@ int analyseFile (const juce::File& file, const juce::File& outDir, InputType inp
         auto nat = base; nat.mode = Mode::studio; nat.retuneMs = 85.0f; nat.humanize = 45.0f; nat.tolerance = 35.0f; configs.push_back ({ "studio-natural", nat });
         auto livePop = pop; livePop.mode = Mode::live; configs.push_back ({ "live-pop", livePop });
         auto chroma = pop; chroma.allowed = allNotes; configs.push_back ({ "studio-pop-chrom", chroma });
+        // A large shift (Pop plus +5 st), where PSOLA repeats one period in three and breath is most at risk.
+        auto shift = pop; shift.transpose = 5.0f; configs.push_back ({ "studio-pop+5st", shift });
+        auto liveShift = shift; liveShift.mode = Mode::live; configs.push_back ({ "live-pop+5st", liveShift });
         // Formant methods: the same Pop correction resynthesised from the LPC residual, and a +3 st
         // formant shift with each method (the envelope distance there is the intended change).
         auto popSf = pop; popSf.formantMethod = FormantMethod::lpcSourceFilter; configs.push_back ({ "studio-pop-lpcsf", popSf });
@@ -777,6 +1032,8 @@ int analyseFile (const juce::File& file, const juce::File& outDir, InputType inp
         std::vector<float> l = inL, r = inR;
         std::vector<float> delayAtBlock;
         std::vector<float> trackedHz;
+        double correctionSum = 0.0;
+        long correctionCount = 0;
         float dMin = 1e9f, dMax = 0.0f;
         double dSum = 0.0;
         int dCount = 0;
@@ -788,7 +1045,10 @@ int analyseFile (const juce::File& file, const juce::File& outDir, InputType inp
             DisplayFrame frames[256];
             for (int got; (got = dsp.popDisplayFrames (frames, 256)) > 0;)
                 for (int i = 0; i < got; ++i)
+                {
                     trackedHz.push_back (frames[i].inputHz);
+                    if (frames[i].inputHz > 0.0f) { correctionSum += std::abs (frames[i].correctionCents); ++correctionCount; }
+                }
             delayAtBlock.push_back (dsp.getEffectiveDelaySamples());
             if (pos > (int) fs)
             {
@@ -855,6 +1115,41 @@ int analyseFile (const juce::File& file, const juce::File& outDir, InputType inp
                          dMin * 1000.0 / fs, dMax * 1000.0 / fs, dSum / std::max (1, dCount) * 1000.0 / fs);
         const auto rep = compareBands (refL, outL, fs);
         const auto art = artifactMetrics (refL, outL, fs, inputType);
+        {
+            // Harmonics-to-noise ratio and per-band periodicity on the reference's voiced frames.
+            static Periodicity inPer;
+            static bool haveIn = false;
+            const float lo = inputType == InputType::soprano ? 130.0f : inputType == InputType::lowMale ? 55.0f : 80.0f;
+            const float hi = inputType == InputType::soprano ? 1100.0f : inputType == InputType::lowMale ? 420.0f : 800.0f;
+            const std::vector<std::pair<double, double>> all { { 0.0, (double) refL.size() / fs } };
+            if (! haveIn) { inPer = periodicity (BandSet (refL, fs), fs, all, lo, hi, &refL); haveIn = true; }
+            const auto o = periodicity (BandSet (outL, fs), fs, all, lo, hi, &refL);
+            // Tuning: distance of the sung and the processed pitch to the nearest allowed note (10 ms grid,
+            // frames the input calls clearly voiced). With it, the distances above can be read against
+            // how far the pitch was actually moved.
+            double tunedIn = 0, tunedOut = 0;
+            long tunedN = 0;
+            {
+                PitchDetector det;
+                const int window = (int) std::ceil (fs / lo) + 2;
+                det.prepare (fs, window);
+                for (size_t end = (size_t) (2 * window); end < outL.size(); end += (size_t) (fs / 100.0))
+                {
+                    const auto ri = det.detect (refL.data() + end - 2 * (size_t) window, window, (int) (fs / hi), 0.15f);
+                    if (ri.hz <= 0.0f || ri.aperiodicity > 0.2f || ri.rms < 0.003f) continue;
+                    const auto ro = det.detect (outL.data() + end - 2 * (size_t) window, window, (int) (fs / hi), 0.15f);
+                    if (ro.hz <= 0.0f || ro.aperiodicity > 0.3f) continue;
+                    const double ci = 6900.0 + 1200.0 * std::log2 (ri.hz / 440.0), co = 6900.0 + 1200.0 * std::log2 (ro.hz / 440.0);
+                    if (std::abs (co - ci) > 300.0) continue; // octave errors of the measurement
+                    tunedIn += std::abs (ci - nearestInScale (ci, cfg.p.allowed) * 100.0);
+                    tunedOut += std::abs (co - nearestInScale (co, cfg.p.allowed) * 100.0);
+                    ++tunedN;
+                }
+            }
+            std::printf ("  %-19s HNR %5.2f>%5.2f dB, periodicity <1k %4.3f>%4.3f, 1-3k %4.3f>%4.3f, >3k %4.3f>%4.3f, >5k %4.3f>%4.3f (%d frames); off-note %.1f>%.1f ct, mean |correction| %.1f ct\n", cfg.name,
+                         inPer.hnrDb, o.hnrDb, inPer.band[0], o.band[0], inPer.band[1], o.band[1], inPer.band[2], o.band[2], inPer.air, o.air, o.frames,
+                         tunedIn / (double) std::max (1L, tunedN), tunedOut / (double) std::max (1L, tunedN), correctionSum / (double) std::max (1L, correctionCount));
+        }
         std::printf ("  %-19s %+7.1f   %6.1f / %6.1f / %6.1f      %5.2f / %5.2f / %5.2f      %4.2f / %4.2f / %4.2f        %4.2f>%4.2f %4.2f>%4.2f %4.2f>%4.2f   %.3f>%.3f   %4.1f>%4.1f   (%.2f %% CPU)\n", cfg.name,
                      sideToMidDb (outL, outR), rep.nullDb[0], rep.nullDb[1], rep.nullDb[2], rep.lsdDb[0], rep.lsdDb[1], rep.lsdDb[2],
                      art.envelope[0], art.envelope[1], art.envelope[2], art.flutterIn[0], art.flutterOut[0], art.flutterIn[1], art.flutterOut[1],
@@ -1082,6 +1377,377 @@ void humanChecks (double fs, Mode mode, const NoteMask cMajor)
         if (verbose) std::printf ("      jitter in %.3f %% out %.3f %%\n", inJitter, outJitter);
     }
 }
+
+/**
+    Envelope study for the LPC formant methods: how well each all-pole fit follows a known vocal
+    tract as the voice gets higher. A steady vowel is built additively: every harmonic up to
+    0.45 fs, with the amplitude and phase of a five-formant cascade (all-pole) tract at its
+    frequency times the 1/f fall-off of the glottal source, so the true envelope is known exactly
+    and lies inside the model class (the error is then harmonic sampling, not model mismatch).
+    F1-F5 = 700, 1220, 2600, 3300, 3750 Hz (bandwidths 110, 120, 160, 250, 200 Hz), and the same
+    tract 15 % shorter. One frame, as long as the engine's Soprano frame (two periods of 130 Hz).
+    Error: RMS log-spectral distance (dB), mean level removed, over [max (150 Hz, 0.8 f0), 5 kHz]
+    (below f0 there is nothing to measure), against the tract times the source tilt and the
+    analysers' pre-emphasis.
+*/
+void envelopeStudy (double fs)
+{
+    std::printf ("\n== Envelope study (%.0f kHz): RMS dB error of the all-pole envelope against the true one ==\n", fs / 1000.0);
+    std::printf ("  %-8s %-6s %8s %8s %8s   %s\n", "f0 Hz", "tract", "LPC", "TE", "DAP", "(time per frame: LPC / TE / DAP)");
+    LpcAnalyzer lpc;
+    const int n = (int) std::ceil (2.0 * fs / 130.0);
+    lpc.prepare (fs, (int) std::ceil (0.032 * fs) + 2);
+    const int p = lpc.order();
+    double total[3] {}, high[3] {};
+    int counted = 0, highCounted = 0;
+    for (double scale : { 1.0, 1.15 })
+        for (double f0 : { 130.0, 200.0, 300.0, 450.0, 650.0, 1000.0 })
+        {
+            struct Formant { double f, bw; };
+            const Formant formants[] { { 700, 110 }, { 1220, 120 }, { 2600, 160 }, { 3300, 250 }, { 3750, 200 } };
+            const auto tract = [&] (double f)
+            {
+                const std::complex<double> z1 = std::polar (1.0, -2.0 * pi * f / fs), z2 = z1 * z1;
+                std::complex<double> h = 1.0;
+                for (const auto& r : formants)
+                {
+                    const double rad = std::exp (-pi * r.bw / fs), theta = 2.0 * pi * r.f * scale / fs;
+                    h *= (1.0 - 2.0 * rad * std::cos (theta) + rad * rad) / (1.0 - 2.0 * rad * std::cos (theta) * z1 + rad * rad * z2);
+                }
+                return h;
+            };
+            const auto truthDb = [&] (double f)
+            {
+                const double pre = std::abs (1.0 - 0.97 * std::polar (1.0, -2.0 * pi * f / fs));
+                return 20.0 * std::log10 (std::abs (tract (f)) * pre / f);
+            };
+            std::vector<float> frame ((size_t) n);
+            for (int kH = 1; kH * f0 < 0.45 * fs; ++kH)
+            {
+                const auto h = tract (kH * f0);
+                const double amp = std::abs (h) / kH, ph = std::arg (h);
+                for (int t = 0; t < n; ++t)
+                    frame[(size_t) t] += (float) (0.1 * amp * std::sin (2.0 * pi * kH * f0 * t / fs + ph));
+            }
+            double err[3] {}, cost[3] {};
+            for (int method = 0; method < 3; ++method)
+            {
+                float k[maxLpcOrder] {}, e = 0.0f;
+                const auto start = std::chrono::steady_clock::now();
+                for (int rep = 0; rep < 20; ++rep)
+                {
+                    if (method == 0) lpc.analyse (frame.data(), n, k, e);
+                    else if (method == 1) lpc.analyseTrueEnvelope (frame.data(), n, f0, k, e);
+                    else lpc.analyseDap (frame.data(), n, f0, k, e);
+                }
+                cost[method] = std::chrono::duration<double> (std::chrono::steady_clock::now() - start).count() / 20.0 * 1.0e6;
+                double a[maxLpcOrder + 1] {}, prev[maxLpcOrder + 1] {};
+                a[0] = 1.0;
+                for (int m = 1; m <= p; ++m)
+                {
+                    std::copy (a, a + maxLpcOrder + 1, prev);
+                    for (int i = 1; i < m; ++i) a[i] = prev[i] + k[m - 1] * prev[m - i];
+                    a[m] = k[m - 1];
+                }
+                std::vector<double> d;
+                for (double f = std::max (150.0, 0.8 * f0); f <= 5000.0; f += 10.0)
+                {
+                    const std::complex<double> z = std::polar (1.0, -2.0 * pi * f / fs);
+                    std::complex<double> A = 0.0, zi = 1.0;
+                    for (int i = 0; i <= p; ++i) { A += a[i] * zi; zi *= z; }
+                    d.push_back (-20.0 * std::log10 (std::abs (A)) - truthDb (f));
+                }
+                double mean = 0;
+                for (double x : d) mean += x;
+                mean /= (double) d.size();
+                double var = 0;
+                for (double x : d) var += (x - mean) * (x - mean);
+                err[method] = std::sqrt (var / (double) d.size());
+                total[method] += err[method];
+                if (f0 >= 300.0) high[method] += err[method];
+            }
+            ++counted;
+            if (f0 >= 300.0) ++highCounted;
+            std::printf ("  %-8.0f %-6.2f %8.2f %8.2f %8.2f   (%.0f / %.0f / %.0f us)\n", f0, scale, err[0], err[1], err[2], cost[0], cost[1], cost[2]);
+        }
+    std::printf ("  %-15s %8.2f %8.2f %8.2f\n", "mean", total[0] / counted, total[1] / counted, total[2] / counted);
+    std::printf ("  %-15s %8.2f %8.2f %8.2f\n", "mean f0>=300", high[0] / highCounted, high[1] / highCounted, high[2] / highCounted);
+}
+
+/**
+    End-to-end formant shift for the LPC methods on high voices: a steady synthetic vowel at f0
+    200-900 Hz, Formant +4 st, Studio, nothing else moved.
+    The ideal output keeps every harmonic where it is and changes its level by the tract's own
+    ratio |H(f / phi)| / |H(f)|, phi = 2^(4/12). The vowel is envelopeStudy's all-pole one. Error: RMS over the harmonics up to 4 kHz and within 40 dB of
+    the strongest of (measured output/input level change - ideal change), dB, mean removed.
+*/
+void formantShiftStudy (double fs)
+{
+    std::printf ("\n== Formant +4 st on steady high voices (%.0f kHz): RMS dB error of the harmonic levels ==\n", fs / 1000.0);
+    std::printf ("  %-8s %10s %14s\n", "f0 Hz", "LPC env", "LPC src-filt");
+    const double phi = std::pow (2.0, 4.0 / 12.0);
+    // The all-pole (cascade) five-formant tract of envelopeStudy, so the ideal shift is one an
+    // all-pole envelope can reach (makeVoice's parallel tract has zeros between its formants).
+    struct Formant { double f, bw; };
+    const Formant formants[] { { 700, 110 }, { 1220, 120 }, { 2600, 160 }, { 3300, 250 }, { 3750, 200 } };
+    const auto tract = [&] (double f)
+    {
+        const std::complex<double> z1 = std::polar (1.0, -2.0 * pi * f / fs), z2 = z1 * z1;
+        std::complex<double> h = 1.0;
+        for (const auto& r : formants)
+        {
+            const double rad = std::exp (-pi * r.bw / fs), theta = 2.0 * pi * r.f / fs;
+            h *= (1.0 - 2.0 * rad * std::cos (theta) + rad * rad) / (1.0 - 2.0 * rad * std::cos (theta) * z1 + rad * rad * z2);
+        }
+        return h;
+    };
+    const auto H = [&] (double f, double) { return std::abs (tract (f)); };
+    constexpr int order = 15, size = 1 << order;
+    juce::dsp::FFT fft (order);
+    const auto levels = [&] (const std::vector<float>& x, size_t from, double f0, std::vector<double>& out)
+    {
+        std::vector<float> buf ((size_t) size * 2, 0.0f);
+        for (int i = 0; i < size; ++i)
+            buf[(size_t) i] = x[from + (size_t) i] * (float) (0.5 - 0.5 * std::cos (2.0 * pi * i / size));
+        fft.performFrequencyOnlyForwardTransform (buf.data());
+        out.clear();
+        for (int k = 1; k * f0 <= 5000.0; ++k)
+        {
+            const int b = (int) std::lround (k * f0 * size / fs);
+            float m = 0.0f;
+            for (int c = b - 3; c <= b + 3; ++c) m = std::max (m, buf[(size_t) c]);
+            out.push_back (20.0 * std::log10 (std::max (1.0e-9f, m)));
+        }
+    };
+    double total[2] {};
+    int counted = 0;
+    for (double f0 : { 200.0, 300.0, 450.0, 650.0, 900.0 })
+    {
+        // Additive vowel: every harmonic up to 0.45 fs with the tract's amplitude and phase and a
+        // 1/f source fall-off, plus a -60 dB breath floor (a real voice is never empty between
+        // its harmonics); 40 ms fades.
+        struct Voiced { std::vector<float> mix; } v;
+        v.mix.assign ((size_t) (1.6 * fs), 0.0f);
+        for (int kH = 1; kH * f0 < 0.45 * fs; ++kH)
+        {
+            const auto h = tract (kH * f0);
+            const double amp = 0.05 * std::abs (h) / kH, ph = std::arg (h), w = 2.0 * pi * kH * f0 / fs;
+            for (size_t t = (size_t) (0.05 * fs); t < (size_t) (1.45 * fs); ++t)
+                v.mix[t] += (float) (amp * std::sin (w * (double) t + ph));
+        }
+        {
+            juce::Random rng (5);
+            for (size_t t = 0; t < v.mix.size(); ++t)
+            {
+                const double age = (double) t / fs - 0.05, env = std::clamp (std::min (age, 1.4 - age) / 0.04, 0.0, 1.0);
+                v.mix[t] = (float) (env * (v.mix[t] + 1.0e-3 * (rng.nextDouble() * 2.0 - 1.0)));
+            }
+        }
+        std::vector<double> in;
+        const size_t from = (size_t) (0.6 * fs);
+        levels (v.mix, from, f0, in);
+        double err[2] {};
+        for (int m = 0; m < 2; ++m)
+        {
+            SnaplineParams p;
+            p.mode = Mode::studio;
+            p.inputType = f0 >= 300.0 ? InputType::soprano : InputType::altoTenor;
+            p.allowed = allNotes;
+            p.amount = 0.0f;
+            p.formantShift = 4.0f;
+            p.formantMethod = m == 0 ? FormantMethod::lpcEnvelope : FormantMethod::lpcSourceFilter;
+            const auto r = run (v.mix, fs, 256, p);
+            std::vector<double> out;
+            levels (r.left, from + (size_t) (0.1 * fs), f0, out);
+            std::vector<double> d;
+            const double strongest = *std::max_element (in.begin(), in.end());
+            for (size_t k = 0; k < in.size(); ++k)
+            {
+                const double f = (double) (k + 1) * f0;
+                if (f > 4000.0 || in[k] < strongest - 40.0) continue; // F1-F4, harmonics that carry the vowel
+                d.push_back ((out[k] - in[k]) - 20.0 * std::log10 (H (f / phi, 1.0) / H (f, 1.0)));
+                if (envFlag ("SNAPLINE_VERBOSE") && m == 0 && f0 == 300.0)
+                    std::printf ("      %5.0f Hz: in %6.1f dB, out-in %+6.1f, ideal %+6.1f\n", f, in[k], out[k] - in[k], 20.0 * std::log10 (H (f / phi, 1.0) / H (f, 1.0)));
+            }
+            double mean = 0;
+            for (double x : d) mean += x;
+            mean /= (double) d.size();
+            double var = 0;
+            for (double x : d) var += (x - mean) * (x - mean);
+            err[m] = std::sqrt (var / (double) d.size());
+            total[m] += err[m];
+        }
+        ++counted;
+        std::printf ("  %-8.0f %10.2f %14.2f\n", f0, err[0], err[1]);
+    }
+    std::printf ("  %-8s %10.2f %14.2f\n", "mean", total[0] / counted, total[1] / counted);
+}
+
+/**
+    Voice suite: the same corrections on singers unlike the alto test voice (a low male voice near
+    90 Hz, a soprano near 500 Hz, breathy voices at breath 0.6 and 0.9 whose harmonics stop at
+    4 kHz, vocal fry with jitter, shimmer and alternating cycles, and a pressed / belted source),
+    in Studio and Live at 48 kHz. For each: hard-tune accuracy, harmonics-to-noise ratio and
+    per-band periodicity of the output against the input, aspiration periodicity in the breath-only
+    band, period jitter, 1/3-octave envelope distance and the click index. A summary row per mode
+    is what later engine changes are judged by; a few loose guards catch regressions.
+*/
+struct SuiteRow
+{
+    double accuracy = 0, hnrIn = 0, hnrOut = 0, bandIn[3] {}, bandOut[3] {}, airIn = 0, airOut = 0;
+    double jitterIn = 0, jitterOut = 0, envelope[3] {}, clickIn = 0, clickOut = 0, roughIn = 0, roughOut = 0, cpu = 0, delayMs = 0;
+};
+
+void voiceSuite (double fs, const NoteMask cMajor)
+{
+    struct SuiteVoice
+    {
+        const char* name;
+        InputType type;
+        std::vector<Note> notes;
+        Glottis g;
+        bool air;
+    };
+    std::vector<SuiteVoice> voices;
+    {
+        Glottis alto;
+        voices.push_back ({ "alto", InputType::altoTenor, { { 0.2, 0.8, 57.35, 0.0 }, { 1.1, 0.9, 62.15, 40.0 }, { 2.1, 0.8, 63.6, 0.0 }, { 3.0, 0.9, 60.0, 0.0, 57.0 } }, alto, false });
+        Glottis low;
+        low.tilt = 1.1; low.noise = 0.03; low.formantScale = 0.9;
+        voices.push_back ({ "low male", InputType::lowMale, { { 0.2, 0.9, 41.3, 0.0 }, { 1.2, 0.9, 43.25, 0.0 }, { 2.2, 1.0, 40.7, 40.0 }, { 3.3, 0.8, 45.35, 0.0 } }, low, false });
+        Glottis sop;
+        sop.formantScale = 1.15; sop.noise = 0.02;
+        voices.push_back ({ "soprano", InputType::soprano, { { 0.2, 0.8, 71.3, 0.0 }, { 1.1, 1.0, 72.25, 45.0 }, { 2.2, 0.8, 69.7, 0.0 }, { 3.1, 0.8, 74.2, 0.0 } }, sop, false });
+        Glottis breathy;
+        breathy.noise = 0.6; breathy.aspiration = 1.0; breathy.pulsed = 0.6; breathy.harmonicCeiling = 4000.0;
+        voices.push_back ({ "breathy 0.6", InputType::altoTenor, { { 0.2, 0.8, 57.35, 0.0 }, { 1.1, 0.9, 62.15, 40.0 }, { 2.1, 0.8, 63.6, 0.0 }, { 3.0, 0.8, 55.25, 0.0 } }, breathy, true });
+        auto airy = breathy;
+        airy.noise = 0.9; airy.aspiration = 1.5;
+        voices.push_back ({ "breathy 0.9", InputType::altoTenor, { { 0.2, 0.8, 57.35, 0.0 }, { 1.1, 0.9, 62.15, 40.0 }, { 2.1, 0.8, 63.6, 0.0 }, { 3.0, 0.8, 55.25, 0.0 } }, airy, true });
+        Glottis fry;
+        fry.tilt = 0.9; fry.jitter = 0.03; fry.shimmer = 0.15; fry.diplophonia = 0.35; fry.noise = 0.05; fry.formantScale = 0.95;
+        voices.push_back ({ "fry", InputType::lowMale, { { 0.2, 1.0, 38.3, 0.0 }, { 1.3, 1.0, 40.25, 0.0 } }, fry, false });
+        Glottis belt;
+        belt.tilt = 0.55; belt.noise = 0.01; belt.formantScale = 1.05;
+        voices.push_back ({ "belt", InputType::altoTenor, { { 0.2, 0.8, 64.3, 0.0 }, { 1.1, 1.0, 67.25, 40.0 }, { 2.2, 0.8, 69.35, 0.0 }, { 3.1, 0.8, 65.3, 0.0 } }, belt, false });
+    }
+
+    // shift5: hard tune plus a +5 st transpose, where PSOLA repeats one period in three and breath
+    // is most at risk of turning into a buzz.
+    struct Config { const char* name; float retune, humanize, natural, amount, transpose; };
+    constexpr int configCount = 4;
+    const Config configs[configCount] { { "amount0", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f }, { "pop", 18.0f, 20.0f, 0.0f, 100.0f, 0.0f },
+                                        { "hard", 0.0f, 0.0f, -100.0f, 100.0f, 0.0f }, { "shift5", 0.0f, 0.0f, -100.0f, 100.0f, 5.0f } };
+
+    std::printf ("\n== Voice suite (%.0f kHz) ==\n", fs / 1000.0);
+    std::printf ("  %-12s %-6s %-8s %6s  %-13s %-29s %-13s %-13s %-20s %-11s %s\n", "voice", "mode", "config", "acc ct", "HNR dB in>out",
+                 "periodicity <1k / 1-3k / >3k", "air in>out", "jitter % in>out", "envelope dist dB", "click in>out", "rough in>out");
+    for (Mode mode : { Mode::studio, Mode::live })
+    {
+        SuiteRow total[configCount];
+        int counted[configCount] {};
+        bool allFinite = true;
+        double worstPeak = 0.0;
+        for (const auto& v : voices)
+        {
+            double end = 0;
+            for (const auto& n : v.notes) end = std::max (end, n.start + n.length);
+            const auto voice = makeVoice (fs, v.notes, end + 0.4, v.g);
+            const auto& range = v.type == InputType::soprano ? std::pair<float, float> { 130.0f, 1100.0f }
+                              : v.type == InputType::lowMale ? std::pair<float, float> { 55.0f, 420.0f } : std::pair<float, float> { 80.0f, 800.0f };
+            std::vector<std::pair<double, double>> spans, plain;
+            for (const auto& n : v.notes)
+            {
+                spans.push_back ({ n.start + 0.15 + (n.glideFrom != 0.0 ? 0.35 : 0.0), n.start + n.length - 0.08 });
+                if (n.vibratoCents == 0.0 && n.glideFrom == 0.0) plain.push_back (spans.back());
+            }
+            const BandSet inBands (voice.mix, fs);
+            const auto in = periodicity (inBands, fs, spans, range.first, range.second, &voice.mix);
+            for (int c = 0; c < configCount; ++c)
+            {
+                SnaplineParams p;
+                p.mode = mode;
+                p.inputType = v.type;
+                p.allowed = cMajor;
+                p.retuneMs = configs[c].retune;
+                p.humanize = configs[c].humanize;
+                p.naturalVibrato = configs[c].natural;
+                p.amount = configs[c].amount;
+                p.transpose = configs[c].transpose;
+                const auto r = run (voice.mix, fs, 256, p);
+                const auto out = alignToInput (r);
+                SuiteRow row;
+                const bool tuned = c >= 2;
+                if (tuned)
+                    row.accuracy = accuracy (track (out, fs), 0.0, v.notes, [&] (const Note& n) { return nearestInScale (n.midi * 100.0, cMajor) * 100.0 + 100.0 * configs[c].transpose; }).meanAbs;
+                const auto o = periodicity (BandSet (out, fs), fs, spans, range.first, range.second, &voice.mix);
+                row.hnrIn = in.hnrDb; row.hnrOut = o.hnrDb;
+                for (int b = 0; b < 3; ++b) { row.bandIn[b] = in.band[b]; row.bandOut[b] = o.band[b]; }
+                row.airIn = in.air; row.airOut = o.air;
+                int jn = 0;
+                for (const auto& [from, to] : plain)
+                {
+                    double f0 = 0;
+                    for (const auto& n : v.notes) if (std::abs (n.start + 0.15 - from) < 1e-9) f0 = 440.0 * std::pow (2.0, (n.midi - 69.0) / 12.0);
+                    if (f0 <= 0) continue;
+                    row.jitterIn += periodJitter (voice.mix, fs, from, to, f0);
+                    row.jitterOut += periodJitter (out, fs, from, to, f0);
+                    ++jn;
+                }
+                if (jn > 0) { row.jitterIn /= jn; row.jitterOut /= jn; }
+                const auto art = artifactMetrics (voice.mix, out, fs, v.type);
+                for (int b = 0; b < 3; ++b) row.envelope[b] = art.envelope[b];
+                row.roughIn = art.roughIn; row.roughOut = art.roughOut;
+                row.clickIn = clickIndex (voice.mix, fs, 0, voice.mix.size());
+                row.clickOut = clickIndex (r.left, fs, 0, r.left.size()); // the raw output: the re-aligned one jumps where Live's delay moves
+                row.cpu = 100.0 * r.seconds / (end + 0.4);
+                double dsum = 0;
+                for (float d : r.blockDelay) dsum += d;
+                row.delayMs = dsum / (double) std::max<size_t> (1, r.blockDelay.size()) * 1000.0 / fs;
+                std::printf ("  %-12s %-6s %-8s %6s  %5.1f>%5.1f   %4.2f>%4.2f %4.2f>%4.2f %4.2f>%4.2f   %s   %4.2f>%4.2f    %4.2f/%4.2f/%4.2f     %4.1f>%4.1f   %.3f>%.3f\n",
+                             v.name, mode == Mode::studio ? "studio" : "live", configs[c].name,
+                             tuned ? juce::String (row.accuracy, 2).toRawUTF8() : "-", row.hnrIn, row.hnrOut,
+                             row.bandIn[0], row.bandOut[0], row.bandIn[1], row.bandOut[1], row.bandIn[2], row.bandOut[2],
+                             v.air ? juce::String::formatted ("%5.3f>%5.3f", row.airIn, row.airOut).toRawUTF8() : "     -     ",
+                             row.jitterIn, row.jitterOut, row.envelope[0], row.envelope[1], row.envelope[2], row.clickIn, row.clickOut, row.roughIn, row.roughOut);
+                allFinite = allFinite && finite (r);
+                worstPeak = std::max (worstPeak, peakOf (r));
+                // Totals over the non-fry voices (fry is reported, not averaged: it is mostly irregular).
+                if (std::string (v.name) != "fry")
+                {
+                    auto& t = total[c];
+                    t.accuracy += row.accuracy; t.hnrIn += row.hnrIn; t.hnrOut += row.hnrOut;
+                    for (int b = 0; b < 3; ++b) { t.bandIn[b] += row.bandIn[b]; t.bandOut[b] += row.bandOut[b]; t.envelope[b] += row.envelope[b]; }
+                    if (v.air) { t.airIn += 0.5 * row.airIn; t.airOut += 0.5 * row.airOut; }
+                    t.jitterIn += row.jitterIn; t.jitterOut += row.jitterOut; t.clickIn += row.clickIn; t.clickOut += row.clickOut;
+                    t.roughIn += row.roughIn; t.roughOut += row.roughOut; t.cpu += row.cpu; t.delayMs += row.delayMs;
+                    ++counted[c];
+                }
+            }
+        }
+        check (allFinite && worstPeak < 0.99, juce::String::formatted ("suite: finite, no clipping (%s)", mode == Mode::studio ? "studio" : "live").toRawUTF8(),
+               juce::String::formatted ("peak %.1f dBFS", toDb (worstPeak)));
+        for (int c = 0; c < configCount; ++c)
+        {
+            auto t = total[c];
+            const double n = std::max (1, counted[c]);
+            std::printf ("  %-12s %-6s %-8s %6s  %5.1f>%5.1f   %4.2f>%4.2f %4.2f>%4.2f %4.2f>%4.2f   %5.3f>%5.3f   %4.2f>%4.2f    %4.2f/%4.2f/%4.2f     %4.1f>%4.1f   %.3f>%.3f   (%.2f %% CPU, delay %.1f ms)\n",
+                         "MEAN", mode == Mode::studio ? "studio" : "live", configs[c].name, c >= 2 ? juce::String (t.accuracy / n, 2).toRawUTF8() : "-",
+                         t.hnrIn / n, t.hnrOut / n, t.bandIn[0] / n, t.bandOut[0] / n, t.bandIn[1] / n, t.bandOut[1] / n, t.bandIn[2] / n, t.bandOut[2] / n,
+                         t.airIn, t.airOut, t.jitterIn / n, t.jitterOut / n, t.envelope[0] / n, t.envelope[1] / n, t.envelope[2] / n,
+                         t.clickIn / n, t.clickOut / n, t.roughIn / n, t.roughOut / n, t.cpu / n, t.delayMs / n);
+            // Loose regression guards on the suite means (the per-voice rows are a report: fry and
+            // the 0.9 breath voice are hard cases by design, and the low voice's vibrato crosses a note boundary).
+            if (c >= 2)
+                check (t.accuracy / n < 8.0, juce::String::formatted ("suite: mean tuning error (%s, %s)", configs[c].name, mode == Mode::studio ? "studio" : "live").toRawUTF8(),
+                       juce::String::formatted ("%.2f ct over %d voices", t.accuracy / n, counted[c]));
+            if (c >= 1)
+                check (t.roughOut / n < 2.0 * t.roughIn / n + 0.01 && t.clickOut / n < 1.5 * t.clickIn / n + 1.0,
+                       juce::String::formatted ("suite: roughness and clicks bounded (%s, %s)", configs[c].name, mode == Mode::studio ? "studio" : "live").toRawUTF8(),
+                       juce::String::formatted ("roughness %.3f (input %.3f), click %.1f (input %.1f)", t.roughOut / n, t.roughIn / n, t.clickOut / n, t.clickIn / n));
+        }
+    }
+}
 }
 
 int main (int argc, char** argv)
@@ -1095,8 +1761,20 @@ int main (int argc, char** argv)
                             (argc > 3 && juce::String (argv[3]).isNotEmpty()) ? juce::File::getCurrentWorkingDirectory().getChildFile (argv[3]) : juce::File(), inputType);
     }
 
-    const juce::File outDir = argc > 1 ? juce::File::getCurrentWorkingDirectory().getChildFile (argv[1]) : juce::File();
     const NoteMask cMajor = maskForKey (scales[1].intervals, 0);
+    if (argc > 1 && juce::String (argv[1]) == "--envelopes")
+    {
+        envelopeStudy (48000.0);
+        formantShiftStudy (48000.0);
+        return 0;
+    }
+    if (argc > 1 && juce::String (argv[1]) == "--suite") // the voice suite alone
+    {
+        voiceSuite (48000.0, cMajor);
+        std::printf ("\n%s\n", failures == 0 ? "All checks passed." : juce::String (juce::String (failures) + " check(s) failed.").toRawUTF8());
+        return failures == 0 ? 0 : 1;
+    }
+    const juce::File outDir = argc > 1 ? juce::File::getCurrentWorkingDirectory().getChildFile (argv[1]) : juce::File();
 
     for (double fs : { 44100.0, 48000.0, 96000.0 })
     {
@@ -1415,6 +2093,7 @@ int main (int argc, char** argv)
         humanChecks (fs, Mode::studio, cMajor);
         humanChecks (fs, Mode::live, cMajor);
     }
+    voiceSuite (48000.0, cMajor);
 
     std::printf ("\n%s\n", failures == 0 ? "All checks passed." : juce::String (juce::String (failures) + " check(s) failed.").toRawUTF8());
     return failures == 0 ? 0 : 1;

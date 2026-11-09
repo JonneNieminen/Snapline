@@ -1,6 +1,8 @@
 #pragma once
+#include <juce_dsp/juce_dsp.h>
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace snapline
@@ -52,6 +54,47 @@ public:
     */
     void warp (const float* k, float error, double phi, float* kOut, float& gain);
 
+    // The two fits below were compared with analyse() for high voices (SnaplineRender --envelopes)
+    // and are not used by the engine: DAP follows a known tract better (7.5 vs 8.7 dB above
+    // 300 Hz) but a formant shift with it was not consistently better, and it costs 4x analyse().
+
+    /**
+        Discrete all-pole model of a voiced frame with fundamental f0 (El-Jaroudi & Makhoul,
+        "Discrete all-pole modeling", IEEE Trans. Signal Processing 39(2), 1991).
+
+        Linear prediction fits the whole power spectrum, but a voiced spectrum is only known at
+        its harmonics; between them it is near zero. For a high voice (few, widely spaced
+        harmonics) LPC's poles then snap to single harmonics instead of the formants. DAP fits
+        the all-pole model P^(w) = g^2 / |A(w)|^2 to the harmonic powers P_m at w_m alone, with the
+        discrete Itakura-Saito distortion
+            E = (1/M) sum_m [ P_m / P^_m - ln (P_m / P^_m) - 1 ].
+        Setting dE/da_i = 0 gives
+            sum_k a_k R(i - k) = g^2 h(-i),   i = 0..p,
+        with R(n) = (1/M) sum_m P_m cos (n w_m) (the autocorrelation of the harmonic samples)
+        and h(n) = (1/M) sum_m Re (e^{j n w_m} / A(w_m)) (the impulse response of 1/A as seen
+        through the harmonics; for a continuous spectrum h(-i) = 0 for i > 0 and the equations are
+        the normal equations of LPC). The fixed point is found by iterating a <- R^-1 h(a),
+        normalised to a_0 = 1 and damped by one half, starting from the LPC solution of R.
+        Harmonic powers are FFT peaks (parabolically refined) of the same windowed, pre-emphasised
+        frame as analyse(); harmonics more than 60 dB under the strongest are left out. Falls back
+        to analyse() when there are fewer harmonics than poles.
+    */
+    void analyseDap (const float* x, int n, double f0, float* k, float& error);
+
+    /**
+        All-pole fit to the "true envelope" of the frame (Imai & Abe 1979; Röbel & Rodet,
+        "Efficient spectral envelope estimation and its application to pitch shifting and
+        envelope preservation", DAFx 2005). The log amplitude spectrum L is smoothed by
+        cepstral liftering (order fs / (2 f0), Hamming lifter), and the smoothed curve V is
+        pushed up wherever the spectrum is above it:
+            A_0 = L,   V_i = lifter (A_i),   A_{i+1} = max (A_i, V_i),
+        until no harmonic is more than 2 dB above V. V then passes through the harmonic peaks
+        instead of averaging the peaks with the gaps between them. Its power exp (2 V) is turned
+        into an autocorrelation and fitted with Levinson-Durbin, so the result is a reflection-
+        coefficient envelope like analyse()'s.
+    */
+    void analyseTrueEnvelope (const float* x, int n, double f0, float* k, float& error);
+
 private:
     static constexpr int bins = 256;
     double fs = 48000.0;
@@ -62,6 +105,13 @@ private:
     std::array<double, bins + 1> envelope {}, warped {};
 
     void solve (std::array<double, maxLpcOrder + 1>& r, float* k, float& error, bool condition) const;
+    int powerSpectrum (const float* x, int n); // windowed, pre-emphasised |X|^2 into `power`; returns bins (N/2 + 1)
+    std::unique_ptr<juce::dsp::FFT> fft;
+    int fftSize = 0;
+    std::vector<float> spectrum, cepstrum;
+    std::vector<double> power, logAmplitude, smooth;
+    static constexpr int maxHarmonics = 256;
+    std::vector<double> dapOmega, dapPower, dapCos, dapSin; // DAP: harmonic frequencies, powers, cos / sin (i w_m)
 };
 
 /** FIR lattice: e = A(z) x (whitening / inverse filter). One instance per channel. */

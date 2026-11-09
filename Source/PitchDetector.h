@@ -15,12 +15,26 @@ namespace snapline
 class PitchDetector
 {
 public:
+    static constexpr int maxCandidates = 24; // local minima of d'(tau) scored per frame
+
+    /** One pYIN pitch candidate: a dip of d'(tau) and the prior mass of the thresholds for which it is the first dip found. */
+    struct Candidate
+    {
+        float hz = 0.0f;
+        float probability = 0.0f;
+    };
+
     struct Result
     {
         float hz = 0.0f;           // 0 when no period was found
         float aperiodicity = 1.0f; // YIN d'(tau) at the chosen lag: 0 = perfectly periodic
         float rms = 0.0f;
         float voicedProbability = 0.0f; // pYIN: share of the threshold prior under which some dip is found
+        // Every candidate with a non-zero probability (without the continuity weight), refined to a
+        // fractional lag, plus the chosen one if the multiple-of-period guard moved it. A tracker
+        // that decodes a path over many frames (Studio's fixed-lag Viterbi) chooses among these.
+        Candidate candidates[maxCandidates];
+        int candidateCount = 0;
     };
 
     /** maxWindow: the largest integration window W that will be used (samples). */
